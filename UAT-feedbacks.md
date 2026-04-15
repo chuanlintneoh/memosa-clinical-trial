@@ -1,4 +1,6 @@
-# BUGS
+# UAT v0.1.0
+
+## BUGS
 
 1. /Tested /Resolved [BUG] Study coordinator, create case page - words at top of page are cut off - SC (including edit case, diagnose case)
 2. /Tested /Resolved [BUG] Some text gets cut off on diagnose case screen, e.g. gender field - SC (hide copy button for a lot of text fields)
@@ -12,7 +14,7 @@
 10. /Tested /Resolved [BUG] Missing created at and created by field data in diagnose case screen
 11. /Tested /Resolved [BUG] Pixel overflow in my invite codes, admin invite code manager screen
 
-# ENHANCEMENTS
+## ENHANCEMENTS
 
 1. /Tested /Resolved [ENHANCEMENT] Diagnose case - do not need to make all fields copy-able - SC (same item as previous resolved bug)
 2. /Tested /Resolved [ENHANCEMENT] Should be able to enlarge image when reviewing - AN (edit case & diagnose case)
@@ -36,9 +38,23 @@
 20. /Nofix [ENHANCEMENT] Case submission and export bundle takes a while - AN
 21. /Tested /Resolved [ENHANCEMENT] Make consent form, biopsy reports also zoomable?
 
-# OTHERS
+## OTHERS
 
 /Nofix [BUG] Cannot find cases after submission - SC (TBC)
 /Nofix [BUG] Search not working - SC, AN [see screenshot] (TBC)
 /Nofix [BUG] Could not test case editing, as cannot search cases after submitting because search not working - SC, AN (TBC)
 /Nofix [BUG] I don't see the cases that I submitted with the study coordinator account. Am I supposed to? - SC,AN (TBC)
+
+# UAT v0.2.0
+
+## BUGS
+
+1. [BUG] Study coordinator edit case does not reflect directly
+2. [BUG] Study coordinator unable to find created case (happened on 8/12 around 3pm by Sara)
+3. [BUG] Name text validator
+
+## ENHANCEMENTS
+
+1. [ENHANCEMENT] Update model to latest / best performing
+2. [ENHANCEMENT] No Lesion -> Normal Mucosa (add condition if lesion type consist of 1 clinical diagnosis, auto assign to it)
+3. [ENHANCEMENT] Feature for deleting user account
