@@ -269,8 +269,9 @@ class DbManagerService {
       if (limit != null) queryParams['limit'] = limit.toString();
       if (daysBack != null) queryParams['days_back'] = daysBack.toString();
 
-      final url = Uri.parse("$_baseUrl/cases/undiagnosed/$clinicianID")
-          .replace(queryParameters: queryParams.isEmpty ? null : queryParams);
+      final url = Uri.parse(
+        "$_baseUrl/cases/undiagnosed/$clinicianID",
+      ).replace(queryParameters: queryParams.isEmpty ? null : queryParams);
       final response = await http.get(url, headers: {'Authorization': idToken});
 
       if (response.statusCode != 200) {

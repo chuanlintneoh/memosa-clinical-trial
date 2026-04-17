@@ -4,8 +4,6 @@ from io import BytesIO
 from nanoid import generate
 from pathlib import Path
 from PIL import Image
-# from sendgrid import SendGridAPIClient
-# from sendgrid.helpers.mail import Attachment, Disposition, FileContent, FileName, FileType, Mail
 from typing import Any, Dict, List, Optional
 import base64
 import json
@@ -19,7 +17,6 @@ import zipfile
 
 from app.api.storage import Storage
 from app.core.config import PASSWORD
-# from app.core.config import SENDGRID_API_KEY, SENDGRID_SENDER_EMAIL
 from app.core.crypto import CryptoUtils
 from app.core.firebase import bucket, db
 
@@ -715,42 +712,3 @@ class DbManager:
         )
         print(f"[DbManager] Uploaded encrypted bundle to {destination} with signed URL valid for {expiry_seconds} seconds.")
         return url
-
-    # def _email_bundle(self, email: str, timestamp: str, zip_path: Path, password_length: int = 12) -> str:
-    #     subject = f'MeMoSA Clinical Platform - Case Bundle {timestamp}'
-    #     content = (
-    #         f'Please find attached the encrypted case bundle generated at {timestamp}.\n'
-    #         f'Use the provided {password_length} character password to extract it.'
-    #     )
-
-    #     encrypted_path = zip_path.with_suffix('.encrypted.zip')
-    #     password = self._encrypt_bundle(zip_path, encrypted_path, password_length)
-
-    #     with open(encrypted_path, 'rb') as f:
-    #         data = f.read()
-    #         encoded_file = base64.b64encode(data).decode()
-
-    #     message = Mail(
-    #         from_email=SENDGRID_SENDER_EMAIL,
-    #         to_emails=email,
-    #         subject=subject,
-    #         plain_text_content=content
-    #     )
-
-    #     attachment = Attachment(
-    #         FileContent(encoded_file),
-    #         FileName(zip_path.name),
-    #         FileType('application/zip'),
-    #         Disposition('attachment')
-    #     )
-    #     message.attachment = attachment
-
-    #     try:
-    #         sg = SendGridAPIClient(SENDGRID_API_KEY)
-    #         response = sg.send(message)
-
-    #         print(f"[DbManager] Sent bundle {zip_path} to email {email}. Status: {response.status_code}")
-    #         return password
-    #     except Exception as e:
-    #         print(f"[DbManager] Failed to send bundle to email {email}: {e}")
-    #         return "NULL"
