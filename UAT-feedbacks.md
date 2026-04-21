@@ -51,11 +51,12 @@
 
 1. [BUG] Study coordinator edit case does not reflect directly
 2. [BUG] Study coordinator unable to find created case (happened on 8/12 around 3pm by Sara)
-3. /Nofix (Intended behaviour) [BUG] Name text validator
+3. /Nofix (Intended behaviour) [BUG] Name text input should not allow apostrophes (')
 
 ## ENHANCEMENTS
 
 1. /Tested /Resolved [ENHANCEMENT] Update model to latest / best performing + threshold setting
 2. /Tested /Resolved [ENHANCEMENT] No Lesion -> Normal Mucosa (add condition if lesion type consist of 1 clinical diagnosis, auto assign to it)
-3. [ENHANCEMENT] Feature for deleting user account
+3. [ENHANCEMENT] UserManager (get, list, edit, soft/hard delete, reactivate user)
 4. [ENHANCEMENT] Write comprehensive documentation
+5. [ENHANCEMENT] Refactor MeMoSA Clinical Platform > MeMoSA Clinical Trial

@@ -4,7 +4,7 @@ from io import BytesIO
 from nanoid import generate
 from pathlib import Path
 from PIL import Image
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import base64
 import json
 import pandas as pd
@@ -17,6 +17,7 @@ import zipfile
 
 from app.api.storage import Storage
 from app.core.config import PASSWORD
+# from app.core.config import SENDGRID_API_KEY, SENDGRID_SENDER_EMAIL
 from app.core.crypto import CryptoUtils
 from app.core.firebase import bucket, db
 
@@ -24,16 +25,17 @@ class DbManager:
     def __init__(self, aiqueue):
         self.aiqueue = aiqueue
         self.pending_cases: Dict[str, Dict[str, Any]] = {}  # Data of cases that have already been sent to AIQueue
+        self.COLLECTION_NAME = "cases"
 
     def uniquify_id(self, case_id: str, max_trials: int = 5, size: int = 8) -> str:
-        doc_ref = db.collection("cases").document(case_id)
+        doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
         trial = 0
 
         while (doc_ref.get().exists or case_id in self.pending_cases) and trial < max_trials:
             print(f"[DbManager] Collision detected for {case_id}, generating a new one (trial {trial+1})")
             case_id = generate(size=size)
             print(f"[DbManager] Generated new case ID: {case_id}")
-            doc_ref = db.collection("cases").document(case_id)
+            doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
             trial += 1
 
         if trial == max_trials and (doc_ref.get().exists or case_id in self.pending_cases):
@@ -122,7 +124,7 @@ class DbManager:
             batch = db.batch()
             for case_id, case_data in new_cases.items():
                 case_data["submitted_at"] = firestore.SERVER_TIMESTAMP
-                doc_ref = db.collection("cases").document(case_id)
+                doc_ref = db.colllection(self.COLLECTION_NAME).document(case_id)
                 batch.set(doc_ref, case_data)
             batch.commit()
             print(f"[DbManager] Batch wrote {len(new_cases)} cases to Firestore.")
@@ -130,12 +132,16 @@ class DbManager:
             print(f"[DbManager] Error batch writing cases: {str(e)}")
 
     def get_case_by_id(self, case_id: str) -> Optional[Dict]:
-        doc = db.collection("cases").document(case_id).get()
-        if doc.exists:
-            print(f"[DbManager] Retrieved case {case_id} from Firestore.")
-            return doc.to_dict()
-        print(f"[DbManager] Case {case_id} not found in Firestore.")
-        return None
+        try:
+            doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
+            if doc.exists:
+                print(f"[DbManager] Retrieved case {case_id} from Firestore.")
+                return doc.to_dict()
+            print(f"[DbManager] Case {case_id} not found in Firestore.")
+            return None
+        except Exception as e:
+            print(f"[DbManager] Error retrieving case {case_id}: {str(e)}")
+            return None
 
     def get_cases_list(
         self,
@@ -166,7 +172,7 @@ class DbManager:
         print(f"[DbManager] Filters: date_range={date_range}, created_by_me={created_by_me}, limit={limit}, start_after_id={start_after_id}")
 
         # Build base query
-        query = db.collection("cases")
+        query = db.colllection(self.COLLECTION_NAME)
 
         # Filter by created_by if requested
         if created_by_me:
@@ -225,7 +231,7 @@ class DbManager:
         # Handle pagination cursor
         if start_after_id:
             # Get the document to start after
-            start_after_doc = db.collection("cases").document(start_after_id).get()
+            start_after_doc = db.colllection(self.COLLECTION_NAME).document(start_after_id).get()
             if start_after_doc.exists:
                 query = query.start_after(start_after_doc)
                 print(f"[DbManager] Starting after case {start_after_id}")
@@ -268,9 +274,14 @@ class DbManager:
             "has_more": has_more
         }
 
-    def edit_case_by_id(self, case_id: str, updates: Dict[str, Any]):
-        db.collection("cases").document(case_id).update(updates)
-        print(f"[DbManager] Updated case {case_id}.")
+    def edit_case_by_id(self, case_id: str, updates: Dict[str, Any]) -> Tuple[str, str]:
+        try:
+            db.colllection(self.COLLECTION_NAME).document(case_id).update(updates)
+            print(f"[DbManager] Updated case {case_id}.")
+            return case_id, "Success"
+        except Exception as e:
+            print(f"[DbManager] Error editing case {case_id}: {str(e)}")
+            return case_id, f"Failed: {str(e)}"
 
     def get_undiagnosed_cases(
         self,
@@ -294,7 +305,7 @@ class DbManager:
         # Query recent cases first to reduce dataset
         cutoff_date = datetime.now() - timedelta(days=days_back)
 
-        query = db.collection("cases")\
+        query = db.colllection(self.COLLECTION_NAME)\
             .where("submitted_at", ">=", cutoff_date)\
             .order_by("submitted_at", direction=firestore.Query.DESCENDING)\
             .limit(limit * 2)  # Query more than limit to account for filtering
@@ -322,47 +333,41 @@ class DbManager:
         print(f"[DbManager] Found {len(undiagnosed_cases)} undiagnosed cases for clinician {clinician_id} (checked {checked_count} recent cases).")
         return undiagnosed_cases
 
-    def submit_case_diagnosis(self, case_id: str, diagnoses: List[Dict[str, Any]]):
-        print(f"[DbManager] Submitting case diagnosis for case {case_id}...")
-        doc_ref = db.collection("cases").document(case_id)
-        doc_snapshot = doc_ref.get()
+    def submit_case_diagnosis(self, case_id: str, diagnoses: List[Dict[str, Any]]) -> Tuple[str, str]:
+        try:
+            print(f"[DbManager] Submitting case diagnosis for case {case_id}...")
+            doc_ref = db.colllection(self.COLLECTION_NAME).document(case_id)
+            doc_snapshot = doc_ref.get()
 
-        if not doc_snapshot.exists:
-            print(f"[DbManager] Case {case_id} not found")
-            return False
+            if not doc_snapshot.exists:
+                print(f"[DbManager] Case {case_id} not found")
+                return False
 
-        data = doc_snapshot.to_dict()
-        existing_diagnoses = data.get("diagnoses", [])
+            data = doc_snapshot.to_dict()
+            existing_diagnoses = data.get("diagnoses", [])
 
-        if len(existing_diagnoses) < len(diagnoses):
-            existing_diagnoses.extend([{} for _ in range(len(diagnoses) - len(existing_diagnoses))])
+            if len(existing_diagnoses) < len(diagnoses):
+                existing_diagnoses.extend([{} for _ in range(len(diagnoses) - len(existing_diagnoses))])
 
-        for idx, diag in enumerate(diagnoses):
-            if not isinstance(diag, dict):
-                continue
+            for idx, diag in enumerate(diagnoses):
+                if not isinstance(diag, dict):
+                    continue
 
-            for clinician_id, diag_data in diag.items():
-                existing_diagnoses[idx][clinician_id] = {
-                    "clinical_diagnosis": diag_data.get("clinical_diagnosis", "NULL"),
-                    "lesion_type": diag_data.get("lesion_type", "NULL"),
-                    "low_quality": diag_data.get("low_quality", False),
-                    "low_quality_reason": diag_data.get("low_quality_reason", "NULL"),
-                    # "timestamp": firestore.SERVER_TIMESTAMP, # Commented because of exception
-                }
+                for clinician_id, diag_data in diag.items():
+                    existing_diagnoses[idx][clinician_id] = {
+                        "clinical_diagnosis": diag_data.get("clinical_diagnosis", "NULL"),
+                        "lesion_type": diag_data.get("lesion_type", "NULL"),
+                        "low_quality": diag_data.get("low_quality", False),
+                        "low_quality_reason": diag_data.get("low_quality_reason", "NULL"),
+                        # "timestamp": firestore.SERVER_TIMESTAMP, # Commented because of exception
+                    }
 
-        doc_ref.update({"diagnoses": existing_diagnoses})
-        print(f"[DbManager] Updated {case_id} with {len(diagnoses)} diagnoses")
-
-    def get_all_cases(self):
-        print(f"[DbManager] Retrieving all cases...")
-        docs = db.collection("cases").stream()
-        all_cases = []
-        for doc in docs:
-            case = doc.to_dict()
-            case["case_id"] = doc.id
-            all_cases.append(case)
-        print(f"[DbManager] Retrieved {len(all_cases)} cases from Firestore.")
-        return all_cases
+            doc_ref.update({"diagnoses": existing_diagnoses})
+            print(f"[DbManager] Updated {case_id} with {len(diagnoses)} diagnoses")
+            return case_id, "Success"
+        except Exception as e:
+            print(f"[DbManager] Error submitting diagnosis of case {case_id}: {str(e)}")
+            return case_id, f"Failed: {str(e)}"
     
     async def export_bundle(
         self,
@@ -394,7 +399,7 @@ class DbManager:
 
         # Get all case IDs first (lightweight query)
         print(f"[DbManager] Fetching case IDs...")
-        docs = db.collection("cases").stream()
+        docs = db.colllection(self.COLLECTION_NAME).stream()
         case_ids = [doc.id for doc in docs]
         total_cases = len(case_ids)
         print(f"[DbManager] Found {total_cases} cases to process.")
@@ -441,7 +446,7 @@ class DbManager:
         for i in range(0, len(case_ids), BATCH_SIZE):
             batch_ids = case_ids[i:i + BATCH_SIZE]
             for case_id in batch_ids:
-                doc = db.collection("cases").document(case_id).get()
+                doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
                 if not doc.exists:
                     continue
                 case_data = doc.to_dict()
@@ -460,7 +465,7 @@ class DbManager:
             print(f"[DbManager] Processing batch {batch_num}/{(len(case_ids) + BATCH_SIZE - 1) // BATCH_SIZE} ({len(batch_ids)} cases)...")
 
             for case_id in batch_ids:
-                doc = db.collection("cases").document(case_id).get()
+                doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
                 if not doc.exists:
                     continue
 
@@ -712,3 +717,42 @@ class DbManager:
         )
         print(f"[DbManager] Uploaded encrypted bundle to {destination} with signed URL valid for {expiry_seconds} seconds.")
         return url
+
+    # def _email_bundle(self, email: str, timestamp: str, zip_path: Path, password_length: int = 12) -> str:
+    #     subject = f'MeMoSA Clinical Platform - Case Bundle {timestamp}'
+    #     content = (
+    #         f'Please find attached the encrypted case bundle generated at {timestamp}.\n'
+    #         f'Use the provided {password_length} character password to extract it.'
+    #     )
+
+    #     encrypted_path = zip_path.with_suffix('.encrypted.zip')
+    #     password = self._encrypt_bundle(zip_path, encrypted_path, password_length)
+
+    #     with open(encrypted_path, 'rb') as f:
+    #         data = f.read()
+    #         encoded_file = base64.b64encode(data).decode()
+
+    #     message = Mail(
+    #         from_email=SENDGRID_SENDER_EMAIL,
+    #         to_emails=email,
+    #         subject=subject,
+    #         plain_text_content=content
+    #     )
+
+    #     attachment = Attachment(
+    #         FileContent(encoded_file),
+    #         FileName(zip_path.name),
+    #         FileType('application/zip'),
+    #         Disposition('attachment')
+    #     )
+    #     message.attachment = attachment
+
+    #     try:
+    #         sg = SendGridAPIClient(SENDGRID_API_KEY)
+    #         response = sg.send(message)
+
+    #         print(f"[DbManager] Sent bundle {zip_path} to email {email}. Status: {response.status_code}")
+    #         return password
+    #     except Exception as e:
+    #         print(f"[DbManager] Failed to send bundle to email {email}: {e}")
+    #         return "NULL"
