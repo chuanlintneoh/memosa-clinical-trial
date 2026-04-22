@@ -16,8 +16,7 @@ class UserManager:
         limit: int = 5,
         start_after_id: Optional[str] = None,
         role: Optional[str] = None,
-        name: Optional[str] = None,
-        sort_desc: Optional[bool] = False
+        name: Optional[str] = None
     ) -> Tuple[Dict[str, Any], str, bool]:
         try:
             query = db.collection(UserManager.COLLECTION_NAME)
@@ -29,9 +28,7 @@ class UserManager:
                 query = query.where(filter=FieldFilter("name", ">=", name))
                 query = query.where(filter=FieldFilter("name", "<=", name + "\uf8ff"))
             
-            if sort_desc is not None:
-                order = firestore.Query.DESCENDING if sort_desc else firestore.Query.ASCENDING
-                query = query.order_by("email", direction=order)
+            query = query.order_by("email", direction=firestore.Query.ASCENDING)
 
             if start_after_id:
                 start_after_doc = db.collection(UserManager.COLLECTION_NAME).document(start_after_id).get()
@@ -94,25 +91,27 @@ class UserManager:
         hard_delete: bool = False
     ) -> Tuple[str, bool]:
         try:
-            # Delete at Firestore
+            auth.revoke_refresh_tokens(user_id)
+            print(f"[UserManager] Revoked user {user_id} tokens")
+
             doc_ref = db.collection(UserManager.COLLECTION_NAME).document(user_id)
 
             if hard_delete:
-                doc_ref.delete()
-                print(f"[UserManager] Hard deleted user {user_id} from Firestore")
                 auth.delete_user(user_id)
                 print(f"[UserManager] Hard deleted user {user_id} from Firebase Auth")
+
+                doc_ref.delete()
+                print(f"[UserManager] Hard deleted user {user_id} from Firestore")
             else:
+                auth.update_user(user_id, disabled=True)
+                print(f"[UserManager] Disabled user {user_id} in Firebase Auth")
+
                 doc_ref.update({
                     "status": "disabled",
                     "disabled_at": firestore.SERVER_TIMESTAMP
                 })
                 print(f"[UserManager] Disabled user {user_id} in Firestore")
-                auth.update_user(user_id, disabled=True)
-                print(f"[UserManager] Disabled user {user_id} in Firebase Auth")
-
-            auth.revoke_refresh_tokens(user_id)
-            print(f"[UserManager] Revoked user {user_id} tokens")
+            
             return "Success", True
 
         except Exception as e:
@@ -137,8 +136,7 @@ class UserManager:
     @staticmethod
     def edit_user(user_id: str, updates: Dict[str, Any]) -> Tuple[str, str, bool]:
         try:
-            allowed_keys = {"email", "name", "role"}
-            valid_roles = {role.value for role in UserRole}
+            allowed_keys = {"email", "name"}
 
             clean_updates = {}
             invalid_keys = []
@@ -146,13 +144,6 @@ class UserManager:
             for k, v in updates.items():
                 if k not in allowed_keys:
                     invalid_keys.append(k)
-                    continue
-
-                if k == "role":
-                    if v in valid_roles:
-                        clean_updates[k] = v
-                    else:
-                        print(f"[UserManager] Rejected invalid role: {v}")
                     continue
 
                 clean_updates[k] = v
@@ -172,9 +163,6 @@ class UserManager:
             if auth_kwargs:
                 auth.update_user(user_id, **auth_kwargs)
                 print(f"[UserManager] Updated {list(auth_kwargs.keys())} for user {user_id} in Firebase Auth")
-            if "role" in clean_updates:
-                auth.set_custom_user_claims(user_id, {"role": clean_updates["role"]})
-                print(f"[UserManager] Updated Custom Claims (role) for user {user_id} in Firebase Auth")
             
             # Update Firestore
             clean_updates["updated_at"] = firestore.SERVER_TIMESTAMP

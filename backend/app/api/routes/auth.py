@@ -51,14 +51,13 @@ def register_user(data: RegisterUser):
         }
 
         return response_data
-    except HTTPException:
-        raise
     except Exception as e:
+        print(f"[Auth Routes] Error registering email {data.email}: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @auth_router.get("/login")
 def login_user(request: Request):
-    uid, role, email, _ = verify_token(request)
+    uid, role, email, _, _ = verify_token(request)
     try:
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -74,4 +73,5 @@ def login_user(request: Request):
         }
         return response
     except Exception as e:
+        print(f"[Auth Routes] Error logging in user {uid}: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e))

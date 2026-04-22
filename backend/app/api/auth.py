@@ -18,6 +18,6 @@ def verify_token(
         if verify_role is None:
             return uid, role, email, decoded, True
         return uid, role, email, decoded, (role == verify_role)
-
     except Exception as e:
+        print(f"[Auth] Error verifying token: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid or expired token") from e

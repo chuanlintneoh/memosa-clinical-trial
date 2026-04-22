@@ -14,8 +14,7 @@ def get_users(
     limit: int = Query(5),
     start_after_id: str = Query(None),
     search_role: str = Query(None),
-    name: str = Query(None),
-    sort_desc: Optional[bool] = Query(False)
+    name: str = Query(None)
 ):
     uid, role, _, _, verified = verify_token(request, UserRole.admin)
     if not verified:
@@ -25,8 +24,7 @@ def get_users(
         limit=limit,
         start_after_id=start_after_id,
         role=search_role,
-        name=name,
-        sort_desc=sort_desc
+        name=name
     )
     return JSONResponse(content={"users": result, "status": status}, status_code=(200 if success else 500))
 

@@ -49,14 +49,16 @@
 
 ## BUGS
 
-1. [BUG] Study coordinator edit case does not reflect directly
-2. [BUG] Study coordinator unable to find created case (happened on 8/12 around 3pm by Sara)
+1. /Improved [BUG] Study coordinator edit case does not reflect directly (Fix: respond first, then write to Firestore in the background > write to Firestore first, then respond)
+2. /Improved [BUG] Study coordinator unable to find created case (happened on 8/12 around 3pm by Sara) (Fix: wait AI inference, then batch write case data & AI results > write case data to Firestore first, batch update AI results after AI inference)
 3. /Nofix (Intended behaviour) [BUG] Name text input should not allow apostrophes (')
+4. /Improved [BUG] Concurrency: Multiple users doing same action at the same time may cause conflicts (Moved heavy tasks to non-blocking background worker)
 
 ## ENHANCEMENTS
 
 1. /Tested /Resolved [ENHANCEMENT] Update model to latest / best performing + threshold setting
 2. /Tested /Resolved [ENHANCEMENT] No Lesion -> Normal Mucosa (add condition if lesion type consist of 1 clinical diagnosis, auto assign to it)
-3. [ENHANCEMENT] UserManager (get, list, edit, soft/hard delete, reactivate user)
-4. [ENHANCEMENT] Write comprehensive documentation
+3. /Tested /Resolved [ENHANCEMENT] UserManager (get, list, edit, soft/hard delete, reactivate user)
+   Test: Generate invite code > Register new clinician > Login clinician > Logout & Login admin > Edit user (name, email) > Logout & Login clinician > Logout & Login admin > Edit user (name, role, email) > Logout & Login clinician > Logout & Login admin > soft delete clinician > Logout & try Login clinician > Login admin > reactivate clinician > Logout & login clinician > Logout & login admin > hard delete clinician > Logout & try login clinician
+4. /Resolved [ENHANCEMENT] Write comprehensive documentation
 5. [ENHANCEMENT] Refactor MeMoSA Clinical Platform > MeMoSA Clinical Trial

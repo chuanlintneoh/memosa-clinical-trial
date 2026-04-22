@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta
 from google.cloud import firestore
+from google.cloud.exceptions import Conflict
 from io import BytesIO
 from nanoid import generate
 from pathlib import Path
 from PIL import Image
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import base64
+import httpx
 import json
 import pandas as pd
 import pyzipper
@@ -24,66 +27,104 @@ from app.core.firebase import bucket, db
 class DbManager:
     def __init__(self, aiqueue):
         self.aiqueue = aiqueue
-        self.pending_cases: Dict[str, Dict[str, Any]] = {}  # Data of cases that have already been sent to AIQueue
         self.COLLECTION_NAME = "cases"
+        self.CASE_ID_LENGTH = 8 # Consistent with client-side Case ID generation
+        self.AI_STATUS_PENDING = "NULL"
+        self.IMAGES_PER_CASE = 9
 
-    def uniquify_id(self, case_id: str, max_trials: int = 5, size: int = 8) -> str:
-        doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
-        trial = 0
-
-        while (doc_ref.get().exists or case_id in self.pending_cases) and trial < max_trials:
-            print(f"[DbManager] Collision detected for {case_id}, generating a new one (trial {trial+1})")
-            case_id = generate(size=size)
-            print(f"[DbManager] Generated new case ID: {case_id}")
+    def create_case(self, case_id: str, case_data: Dict[str, Any]) -> str:
+        try:
+            case_data["diagnoses"] = self._mark_ai_results_pending(case_data.get("diagnoses"))
+            case_data["submitted_at"] = firestore.SERVER_TIMESTAMP
             doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
-            trial += 1
+            try:
+                doc_ref.create(case_data)
+                print(f"[DbManager] Wrote case {case_id} to Firestore")
+                return case_id
+            except Conflict:
+                print(f"[DbManager] Case ID {case_id} already exists, generating new id")
+                new_id = generate(size=self.CASE_ID_LENGTH)
+                print(f"[DbManager] New case ID {new_id} generated to replace {case_id}")
+                db.collection(self.COLLECTION_NAME).document(new_id).create(case_data)
+                print(f"[DbManager] Wrote case {new_id} to Firestore")
+                return new_id
+        except Exception as e:
+            print(f"[DbManager] Error creating case {case_id}: {str(e)}")
+            raise Exception(f"Failed to create case: {str(e)}")
 
-        if trial == max_trials and (doc_ref.get().exists or case_id in self.pending_cases):
-            print(f"[DbManager] Failed to generate unique case ID after {trial} trials")
-            raise ValueError(f"Failed to generate unique case ID after {trial} trials")
+    def _mark_ai_results_pending(self, diagnoses: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        Marking AI status as pending.
+        """
+        default_diag = {
+            "ai_lesion_type": self.AI_STATUS_PENDING,
+            "biopsy_clinical_diagnosis": "NULL",
+            "biopsy_lesion_type": "NULL",
+            "biopsy_report": {"url": "NULL", "iv": "NULL", "fileType": "NULL"},
+            "coe_clinical_diagnosis": "NULL",
+            "coe_lesion_type": "NULL",
+        }
 
-        return case_id
+        if not isinstance(diagnoses, list) or len(diagnoses) == 0:
+            return [dict(default_diag) for _ in range(self.IMAGES_PER_CASE)]
 
-    def enqueue_ai_job(self, case_id: str, case_data: Dict[str, Any]):
+        pending_diagnoses: List[Dict[str, Any]] = []
+        for diag in diagnoses:
+            if not isinstance(diag, dict):
+                pending_diagnoses.append(dict(default_diag))
+                continue
+
+            diag_copy = dict(diag)
+            ai_value = diag_copy.get("ai_lesion_type")
+            if ai_value in (None, "", "NULL"):
+                diag_copy["ai_lesion_type"] = self.AI_STATUS_PENDING
+            pending_diagnoses.append(diag_copy)
+
+        return pending_diagnoses
+
+    async def enqueue_ai_job(self, case_id: str, case_data: Dict[str, Any]):
         # 1. download encrypted blob from Firebase Storage
         # 2. decrypt blob using aes key
         # 3. extract 9 images from decrypted blob in order
         # 4. send case_id: [9 images] to AIQueue for AI diagnosis
-        encrypted_aes = case_data.get("encrypted_aes", {})
-        ciphertext = encrypted_aes.get("ciphertext")
-        iv = encrypted_aes.get("iv")
-        salt = encrypted_aes.get("salt")
-        aes_key = CryptoUtils.decrypt_aes_key_with_passphrase(
-            encrypted_aes_key_b64=ciphertext,
-            passphrase=PASSWORD,
-            salt_b64=salt,
-            iv_b64=iv
-        )
-
         encrypted_blob = case_data.get("encrypted_blob", {})
         url = encrypted_blob.get("url", "NULL")
-        iv = encrypted_blob.get("iv", "NULL")
-        if url == "NULL" or iv == "NULL":
+        blob_iv = encrypted_blob.get("iv", "NULL")
+        if url == "NULL" or blob_iv == "NULL":
             print(f"[DbManager] Invalid encrypted blob for case {case_id}. Cannot enqueue AI job.")
             return
         print(f"[DbManager] Downloading blob from URL: {url}")
         try:
-            response = requests.get(url)
-            if response.status_code != 200:
-                raise RuntimeError(f"Failed to download blob: {response.status_code}")
-            encrypted_blob = base64.b64encode(response.content).decode('utf-8')
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=60.0)
+                if response.status_code != 200:
+                    raise RuntimeError(f"Failed to download blob: {response.status_code}")
+                encrypted_blob = base64.b64encode(response.content).decode('utf-8')
         except Exception as e:
             print(f"[DbManager] Error downloading blob for case {case_id}: {e}")
             return
         
+        encrypted_aes = case_data.get("encrypted_aes", {})
+        ciphertext = encrypted_aes.get("ciphertext")
+        key_iv = encrypted_aes.get("iv")
+        salt = encrypted_aes.get("salt")
+
+        loop = asyncio.get_event_loop()
+        aes_key = await loop.run_in_executor(None, lambda: CryptoUtils.decrypt_aes_key_with_passphrase(
+            encrypted_aes_key_b64=ciphertext,
+            passphrase=PASSWORD,
+            salt_b64=salt,
+            iv_b64=key_iv
+        ))
         print(f"[DbManager] Decrypting blob...")
-        decrypted_data = CryptoUtils.decrypt_string(
+        decrypted_data = await loop.run_in_executor(None, lambda: CryptoUtils.decrypt_string(
             encrypted_blob,
-            iv,
+            blob_iv,
             aes_key
-        )
+        ))
+
         image_b64_list = json.loads(decrypted_data).get("images", [])
-        if len(image_b64_list) != 9:
+        if len(image_b64_list) != self.IMAGES_PER_CASE:
             print(f"[DbManager] Invalid number of images for case {case_id}. Cannot enqueue AI job.")
             return
 
@@ -97,13 +138,14 @@ class DbManager:
         print(f"[DbManager] Enqueued AI job for case: {case_id}")
 
     def receive_AI_results(self, results: Dict[str, Any]):
-        new_cases = {}
+        diagnosis_updates = {}
         for case_id, predictions in results.items():
-            if case_id not in self.pending_cases:
-                print(f"[DbManager] Warning: Received AI result for unknown case_id: {case_id}")
+            case_snapshot = db.collection(self.COLLECTION_NAME).document(case_id).get()
+            if not case_snapshot.exists:
+                print(f"[DbManager] Received AI result for unknown case_id {case_id} in Firestore")
                 continue
-            case_data = self.pending_cases[case_id]
 
+            case_data = case_snapshot.to_dict()
             diagnoses = case_data.get("diagnoses", [])
             if len(diagnoses) != len(predictions):
                 print(f"[DbManager] Mismatch between diagnosis count and predictions for case {case_id}")
@@ -112,28 +154,67 @@ class DbManager:
             for i in range(len(diagnoses)):
                 diagnoses[i]["ai_lesion_type"] = predictions[i]
 
-            case_data["diagnoses"] = diagnoses
-            new_cases[case_id] = case_data
-            del self.pending_cases[case_id]
+            diagnosis_updates[case_id] = diagnoses
         
-        self._batch_write_new_cases(new_cases)
+        self._batch_write_AI_results(diagnosis_updates)
 
-    def _batch_write_new_cases(self, new_cases: Dict[str, Dict[str, Any]]):
-        print(f"[DbManager] Batch writing {len(new_cases)} cases to Firestore...")
+    def _batch_write_AI_results(self, diagnosis_updates: Dict[str, List[Dict[str, Any]]]):
+        print(f"[DbManager] Batch writing AI results for {len(diagnosis_updates)} cases to Firestore...")
         try:
             batch = db.batch()
-            for case_id, case_data in new_cases.items():
-                case_data["submitted_at"] = firestore.SERVER_TIMESTAMP
-                doc_ref = db.colllection(self.COLLECTION_NAME).document(case_id)
-                batch.set(doc_ref, case_data)
+            for case_id, diagnoses in diagnosis_updates.items():
+                doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
+                batch.update(doc_ref, {"diagnoses": diagnoses})
             batch.commit()
-            print(f"[DbManager] Batch wrote {len(new_cases)} cases to Firestore.")
+            print(f"[DbManager] Batch wrote AI results for {len(diagnosis_updates)} cases to Firestore.")
         except Exception as e:
-            print(f"[DbManager] Error batch writing cases: {str(e)}")
+            print(f"[DbManager] Error batch writing AI results: {str(e)}")
+
+    # def requeue_pending_ai_cases(self, limit: int = 100, days_back: int = 30) -> Dict[str, Any]:
+    #     """
+    #     Re-enqueue cases whose AI status is still pending.
+    #     Intended for periodic recovery jobs run outside request/response flow.
+    #     """
+    #     print(f"[DbManager] Re-queueing pending AI cases (limit={limit}, days_back={days_back})...")
+
+    #     cutoff_date = datetime.now() - timedelta(days=days_back)
+    #     docs = db.collection(self.COLLECTION_NAME) \
+    #         .order_by("submitted_at", direction=firestore.Query.DESCENDING) \
+    #         .limit(max(limit * 5, limit)) \
+    #         .stream()
+
+    #     scanned = 0
+    #     queued = 0
+    #     requeued_case_ids: List[str] = []
+
+    #     for doc in docs:
+    #         scanned += 1
+    #         if queued >= limit:
+    #             break
+
+    #         case_data = doc.to_dict()
+    #         submitted_at = case_data.get("submitted_at")
+    #         if submitted_at and submitted_at < cutoff_date:
+    #             continue
+
+    #         diagnoses = case_data.get("diagnoses", [])
+    #         has_pending = any(
+    #             isinstance(diag, dict) and diag.get("ai_lesion_type") == self.AI_STATUS_PENDING
+    #             for diag in diagnoses
+    #         )
+    #         if not has_pending:
+    #             continue
+
+    #         self.enqueue_ai_job(doc.id, case_data)
+    #         queued += 1
+    #         requeued_case_ids.append(doc.id)
+
+    #     print(f"[DbManager] Re-queued {queued} pending cases (scanned {scanned} cases).")
+    #     return {"queued": queued, "scanned": scanned, "case_ids": requeued_case_ids}
 
     def get_case_by_id(self, case_id: str) -> Optional[Dict]:
         try:
-            doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
+            doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
             if doc.exists:
                 print(f"[DbManager] Retrieved case {case_id} from Firestore.")
                 return doc.to_dict()
@@ -172,7 +253,7 @@ class DbManager:
         print(f"[DbManager] Filters: date_range={date_range}, created_by_me={created_by_me}, limit={limit}, start_after_id={start_after_id}")
 
         # Build base query
-        query = db.colllection(self.COLLECTION_NAME)
+        query = db.collection(self.COLLECTION_NAME)
 
         # Filter by created_by if requested
         if created_by_me:
@@ -231,7 +312,7 @@ class DbManager:
         # Handle pagination cursor
         if start_after_id:
             # Get the document to start after
-            start_after_doc = db.colllection(self.COLLECTION_NAME).document(start_after_id).get()
+            start_after_doc = db.collection(self.COLLECTION_NAME).document(start_after_id).get()
             if start_after_doc.exists:
                 query = query.start_after(start_after_doc)
                 print(f"[DbManager] Starting after case {start_after_id}")
@@ -276,7 +357,7 @@ class DbManager:
 
     def edit_case_by_id(self, case_id: str, updates: Dict[str, Any]) -> Tuple[str, str]:
         try:
-            db.colllection(self.COLLECTION_NAME).document(case_id).update(updates)
+            db.collection(self.COLLECTION_NAME).document(case_id).update(updates)
             print(f"[DbManager] Updated case {case_id}.")
             return case_id, "Success"
         except Exception as e:
@@ -305,7 +386,7 @@ class DbManager:
         # Query recent cases first to reduce dataset
         cutoff_date = datetime.now() - timedelta(days=days_back)
 
-        query = db.colllection(self.COLLECTION_NAME)\
+        query = db.collection(self.COLLECTION_NAME)\
             .where("submitted_at", ">=", cutoff_date)\
             .order_by("submitted_at", direction=firestore.Query.DESCENDING)\
             .limit(limit * 2)  # Query more than limit to account for filtering
@@ -336,7 +417,7 @@ class DbManager:
     def submit_case_diagnosis(self, case_id: str, diagnoses: List[Dict[str, Any]]) -> Tuple[str, str]:
         try:
             print(f"[DbManager] Submitting case diagnosis for case {case_id}...")
-            doc_ref = db.colllection(self.COLLECTION_NAME).document(case_id)
+            doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
             doc_snapshot = doc_ref.get()
 
             if not doc_snapshot.exists:
@@ -399,7 +480,7 @@ class DbManager:
 
         # Get all case IDs first (lightweight query)
         print(f"[DbManager] Fetching case IDs...")
-        docs = db.colllection(self.COLLECTION_NAME).stream()
+        docs = db.collection(self.COLLECTION_NAME).stream()
         case_ids = [doc.id for doc in docs]
         total_cases = len(case_ids)
         print(f"[DbManager] Found {total_cases} cases to process.")
@@ -446,7 +527,7 @@ class DbManager:
         for i in range(0, len(case_ids), BATCH_SIZE):
             batch_ids = case_ids[i:i + BATCH_SIZE]
             for case_id in batch_ids:
-                doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
+                doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
                 if not doc.exists:
                     continue
                 case_data = doc.to_dict()
@@ -465,7 +546,7 @@ class DbManager:
             print(f"[DbManager] Processing batch {batch_num}/{(len(case_ids) + BATCH_SIZE - 1) // BATCH_SIZE} ({len(batch_ids)} cases)...")
 
             for case_id in batch_ids:
-                doc = db.colllection(self.COLLECTION_NAME).document(case_id).get()
+                doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
                 if not doc.exists:
                     continue
 
@@ -581,7 +662,7 @@ class DbManager:
                 diagnoses = case.get("diagnoses", [])
                 if not diagnoses:
                     row = base.copy()
-                    for i in range(9):
+                    for i in range(self.IMAGES_PER_CASE):
                         row.update({
                             "image_index": i,
                             "ai_lesion_type": "NULL",

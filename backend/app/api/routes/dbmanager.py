@@ -19,7 +19,7 @@ async def create_case(
     uid, role, _, _, verified = verify_token(request, UserRole.study_coordinator)
     if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
-    
+
     try:
         # 1. receives case data
         data: Dict[str, Any] = await request.json()
@@ -31,18 +31,14 @@ async def create_case(
         encrypted_aes = data.get("encrypted_aes", {})
         if not encrypted_aes:
             return JSONResponse(content={"error": "Missing encrypted AES key"}, status_code=400)
+        
+        # 3. write to firestore
+        case_id = dbmanager.create_case(case_id, data)
 
-        # 3. ensure case_id is unique
-        case_id = dbmanager.uniquify_id(case_id)
-
-        # 4. store case in cache
-        dbmanager.pending_cases[case_id] = data
-
-        # 5. queue job for AI diagnosis
+        # 4. queue job for AI diagnosis
         background_tasks.add_task(dbmanager.enqueue_ai_job, case_id, data)
 
         return JSONResponse(content={"case_id": case_id}, status_code=200)
-
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 

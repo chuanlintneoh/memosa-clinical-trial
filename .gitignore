@@ -5,3 +5,7 @@ google-services.json
 GoogleService-Info.plist
 .flutterfire-*
 .claude/
+
+# Files I don't want to push
+/system-design-draft.excalidraw
+/case_document.json

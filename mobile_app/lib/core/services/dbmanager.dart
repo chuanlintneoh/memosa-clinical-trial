@@ -179,7 +179,7 @@ class DbManagerService {
 
       final url = Uri.parse("$_baseUrl/case/edit?case_id=$caseId");
       final body = jsonEncode(caseData.toJson());
-      final response = await http.post(
+      final response = await http.patch(
         url,
         headers: {'Content-Type': 'application/json', 'Authorization': idToken},
         body: body,
@@ -332,7 +332,7 @@ class DbManagerService {
 
       final url = Uri.parse("$_baseUrl/case/diagnose?case_id=$caseId");
       final body = jsonEncode(diagnoses.toJson());
-      final response = await http.post(
+      final response = await http.patch(
         url,
         headers: {'Content-Type': 'application/json', 'Authorization': idToken},
         body: body,
@@ -362,7 +362,10 @@ class DbManagerService {
       final String idToken = await AuthService.authorize();
 
       final url = Uri.parse("$_baseUrl/bundle/export?include_all=$includeAll");
-      final response = await http.get(url, headers: {'Authorization': idToken});
+      final response = await http.post(
+        url,
+        headers: {'Authorization': idToken},
+      );
 
       return jsonDecode(response.body);
     } catch (e) {

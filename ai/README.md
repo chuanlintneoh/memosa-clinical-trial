@@ -1,101 +1,141 @@
+# AI Module (`/ai`)
+
+This service hosts the image-classification model used in the MeMoSA clinical trial to generate lesion-type predictions for each submitted case image.
+
+## Purpose
+
+The AI module validates a deep learning diagnostic workflow by producing structured predictions that can be compared against:
+
+- clinician diagnoses,
+- coordinator-curated ground truth,
+- and biopsy/COE outcomes when available.
+
+Current inference labels are:
+
+- `CANCER`
+- `OPMD`
+- `OTHER`
+
+The loaded checkpoint is configured in `app/core/config.py` and can be updated for future trial phases.
+
+## Inference Pipeline
+
+1. API receives a JSON payload with base64-encoded image list.
+2. Base64 images are decoded to RGB `PIL.Image`.
+3. Images are transformed by model-specific preprocessing (resize + normalize + tensor conversion).
+4. Batched forward pass is executed with PyTorch.
+5. Class decision uses threshold-aware logic (if configured), otherwise argmax.
+6. Predictions are returned as a list aligned to input image order.
+
+## Integration with Backend
+
+The backend submits image batches to this module after decrypting encrypted case blobs.
+
+Integration contract:
+
+- **Caller**: backend AI queue/DbManager flow
+- **Route**: `POST /inference/predict`
+- **Request**: JSON with `images: string[]` (base64-encoded image bytes)
+- **Response**: JSON with `predictions: string[]`
+
+The backend then writes these predictions into the `diagnoses[*].ai_lesion_type` fields in Firestore.
+
+## Data Specifications
+
+### Input Schema
+
+| Field    | Type       | Required | Description                                                                                             |
+| -------- | ---------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `images` | `string[]` | Yes      | List of base64-encoded image payloads. In production, backend currently sends 9 lesion images per case. |
+
+### Output Schema
+
+| Field         | Type       | Description                                                                 |
+| ------------- | ---------- | --------------------------------------------------------------------------- |
+| `predictions` | `string[]` | Ordered class predictions for each input image (`CANCER`, `OPMD`, `OTHER`). |
+
+### Example Request
+
+```json
+{
+  "images": ["<base64-image-1>", "<base64-image-2>"]
+}
 ```
-# Create virtual env
+
+### Example Response
+
+```json
+{
+  "predictions": ["OPMD", "OTHER"]
+}
+```
+
+## Tech Stack
+
+| Area              | Technology                     | Role                                                  |
+| ----------------- | ------------------------------ | ----------------------------------------------------- |
+| API               | FastAPI, Uvicorn               | Exposes inference endpoint and service health routes. |
+| ML Runtime        | PyTorch, torchvision           | Loads and runs DenseNet/EfficientNet checkpoints.     |
+| Image Processing  | Pillow, albumentations, OpenCV | Decode and preprocess images before inference.        |
+| Packaging         | Docker                         | Deployable container for local or Cloud Run hosting.  |
+| Cloud Integration | Google Cloud Storage client    | Pulls model artifact to `/tmp/models` in Cloud Run.   |
+
+## Local Setup
+
+```bash
+cd ai
 python -m venv venv-ai
-
-# Activate virtual env
-# - Before running FastAPI server (uvicorn)
-# - Before installing new packages
-# - Before running scripts or testing features in the ai
-# PowerShell
-.\venv-ai\Scripts\Activate.ps1
-# Git Bash
-source venv-ai/Scripts/activate
-
-# Deactivate virtual env
-# - when done working on the ai
-deactivate
-
-# Install dependencies
+source venv-ai/Scripts/activate   # Git Bash on Windows
 pip install -r requirements.txt
-
-# Start server
 uvicorn app.main:app --reload --port 8001
-
-# Stop server
-Ctrl + C
-
-# Test Python code
-python -m app.path.code
-
-# Docker commands
-
-# List all existing docker builds
-docker images
-
-# Clean up dangling docker images
-docker image prune
-
-# Delete docker image
-docker rmi <image-name>
-
-# Local offline testing (Build & run docker image)
-1. cd .. (cd to project root)
-2. docker build -t memosa-ct-ai ai/
-3. docker run --rm -it -p 8001:8080 -v "/$(pwd)/ai/models:/ai/models" --env-file ai/.env --name ai-service memosa-ct-ai
-4. Browse http://127.0.0.1:8001/docs
-5. Ctrl + C (quit process)
-
-# Upload / Update gitignored model to Google Cloud Run
-1. gsutil cp models/model_file.pth gs://<BUCKET-NAME>/memosa_ai_models/model_file.pth
-2. (One time setup) IAM & Admin > IAM > <PROJECT_NUMBER>-compute@developer.gserviceaccount.com > Edit principal > Add another role > Storage Object Viewer > Save
-3. Update app.core.config file "MODEL" variable
-
-# To resume the Google Cloud Run hosting
-# 1. Enable trigger at Cloud Build > Triggers > Select trigger > Enable
-# 2. Allow url public access at Cloud Run > Select service > Security > Authentication > Allow public access > Save
 ```
 
-Project Structure for local development:
+Docs URL: `http://127.0.0.1:8001/docs`
 
+## Environment Variables
+
+Use `.env` (based on `ai/.env.example`):
+
+| Variable               | Required               | Purpose                                                                               |
+| ---------------------- | ---------------------- | ------------------------------------------------------------------------------------- |
+| `GOOGLE_CLOUD_PROJECT` | Required for Cloud Run | Used to resolve model storage bucket when runtime is Cloud Run (`K_SERVICE` present). |
+
+Model selection and thresholds are currently managed directly in `app/core/config.py`.
+
+## Deployment
+
+### Docker (local/offline)
+
+From repository root:
+
+```bash
+docker build -t memosa-ct-ai ai/
+docker run --rm -it -p 8001:8080 \
+  -v "$(pwd)/ai/models:/ai/models" \
+  --env-file ai/.env \
+  --name ai-service \
+  memosa-ct-ai
 ```
+
+### Cloud Run Notes
+
+1. Upload/update model artifacts to your GCS path, e.g. `memosa_ai_models/<model>.pth`.
+2. Grant the Cloud Run service account read access to model objects.
+3. Ensure `GOOGLE_CLOUD_PROJECT` is configured.
+4. Deploy container and verify `GET /` and `POST /inference/predict`.
+
+## Module Layout
+
+```text
 ai/
 ├── app/
-│   ├── __init__.py
-│   ├── main.py                 # FastAPI entrypoint
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── inference.py        # /predict endpoint logic
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── model.py            # Model loading and prediction
-│   │   └── utils.py            # Preprocessing/postprocessing helpers
-│   └── config.py               # Global config and env loading
-├── models/
-│   └── model.pth               # Pretrained PyTorch or ONNX model
-├── requirements.txt            # Dependencies
-├── Dockerfile                  # For Cloud Run or other hosting
-└── README.md                   # Documentation
-```
-
-Project Structure for deployed Cloud Run container:
-
-```
-├── ai/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py                 # FastAPI entrypoint
-│   │   ├── api/
-│   │   │   ├── __init__.py
-│   │   │   └── inference.py        # /predict endpoint logic
-│   │   ├── core/
-│   │   │   ├── __init__.py
-│   │   │   ├── model.py            # Model loading and prediction
-│   │   │   └── utils.py            # Preprocessing/postprocessing helpers
-│   │   └── config.py               # Global config and env loading
-│   ├── requirements.txt            # Dependencies
-│   ├── Dockerfile                  # For Cloud Run or other hosting
-│   └── README.md                   # Documentation
-└── tmp/
-    └── models/
-        └── model.pth               # Pretrained PyTorch or ONNX model
+│   ├── main.py                # FastAPI app entry
+│   ├── api/inference.py       # Prediction endpoint
+│   ├── core/config.py         # Model path, labels, thresholds, env
+│   ├── core/models.py         # Model classes + predict_batch logic
+│   └── core/dataloader.py     # Inference dataset wrapper
+├── models/                    # Local model files for development
+├── requirements.txt
+├── Dockerfile
+└── README.md
 ```

@@ -4,9 +4,9 @@ import 'package:http/http.dart' as http;
 import 'package:mobile_app/core/services/auth.dart';
 
 class InviteCodeService {
-  // static const String _baseUrl = "http://10.0.2.2:8000/invite-codes";
+  // static const String _baseUrl = "http://10.0.2.2:8000/invite-manager";
   static final String _baseUrl =
-      "${dotenv.env['BACKEND_SERVER_URL']}/invite-codes";
+      "${dotenv.env['BACKEND_SERVER_URL']}/invite-manager";
 
   /// Generate a new invite code (Admin only)
   static Future<Map<String, dynamic>> generateInviteCode({
@@ -101,7 +101,7 @@ class InviteCodeService {
       final token = await AuthService.authorize();
       final url = Uri.parse("$_baseUrl/revoke");
 
-      final response = await http.post(
+      final response = await http.delete(
         url,
         headers: {'Content-Type': 'application/json', 'Authorization': token},
         body: jsonEncode({"code": code}),

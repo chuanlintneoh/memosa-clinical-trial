@@ -58,7 +58,8 @@ class _HomeScreenState extends State<HomeScreen> {
         return [_buildNavButton(Icons.search, "Undiagnosed Cases")];
       case "admin":
         return [
-          _buildNavButton(Icons.key, "Invite Codes"),
+          _buildNavButton(Icons.key, "Invite Code Manager"),
+          _buildNavButton(Icons.manage_accounts, "User Manager"),
           _buildNavButton(Icons.file_download, "Export Bundle"),
         ];
       default:
@@ -104,10 +105,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 );
                 break;
-              case "Invite Codes":
+              case "Invite Code Manager":
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const InviteCodeManagerScreen()),
+                  MaterialPageRoute(
+                    builder: (_) => const InviteCodeManagerScreen(),
+                  ),
+                );
+                break;
+              case "User Manager":
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const UserManagerScreen()),
                 );
                 break;
               case "Export Bundle":
@@ -189,10 +198,18 @@ class _HomeScreenState extends State<HomeScreen> {
         ];
       case "admin":
         return [
-          _buildQuickAction(Icons.key, "Manage Invite Codes", () {
+          _buildQuickAction(Icons.key, "Invite Code Manager", () {
             Navigator.push(
               context,
-              MaterialPageRoute(builder: (_) => const InviteCodeManagerScreen()),
+              MaterialPageRoute(
+                builder: (_) => const InviteCodeManagerScreen(),
+              ),
+            );
+          }),
+          _buildQuickAction(Icons.manage_accounts, "User Manager", () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const UserManagerScreen()),
             );
           }),
           _buildQuickAction(Icons.file_download, "Export Bundle", () {
