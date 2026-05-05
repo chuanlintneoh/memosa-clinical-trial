@@ -159,11 +159,11 @@ Create `backend/.env` from `backend/.env.example`.
 
 This backend depends on three Firebase services:
 
-| Firebase Service | Usage in Backend |
-| --- | --- |
-| Authentication | Verifies client ID tokens and role claims for RBAC. |
-| Firestore | Stores user profiles, case data, diagnoses, and invite code data. |
-| Storage | Stores encrypted blobs/reports and generated export bundles. |
+| Firebase Service | Usage in Backend                                                  |
+| ---------------- | ----------------------------------------------------------------- |
+| Authentication   | Verifies client ID tokens and role claims for RBAC.               |
+| Firestore        | Stores user profiles, case data, diagnoses, and invite code data. |
+| Storage          | Stores encrypted blobs/reports and generated export bundles.      |
 
 Migration checklist when moving to a new Firebase project:
 
@@ -179,12 +179,12 @@ Store backend runtime variables as secrets and attach them to Cloud Run revision
 
 Required secrets:
 
-| Secret Name (suggested) | Maps to variable | Required |
-| --- | --- | --- |
-| `PASSWORD` | `PASSWORD` | Yes |
-| `AI_URL` | `AI_URL` | Yes |
-| `FIREBASE_BUCKET_NAME` | `FIREBASE_BUCKET_NAME` | Yes |
-| `SENDGRID_API_KEY` | `SENDGRID_API_KEY` | Optional |
+| Secret Name (suggested) | Maps to variable        | Required |
+| ----------------------- | ----------------------- | -------- |
+| `PASSWORD`              | `PASSWORD`              | Yes      |
+| `AI_URL`                | `AI_URL`                | Yes      |
+| `FIREBASE_BUCKET_NAME`  | `FIREBASE_BUCKET_NAME`  | Yes      |
+| `SENDGRID_API_KEY`      | `SENDGRID_API_KEY`      | Optional |
 | `SENDGRID_SENDER_EMAIL` | `SENDGRID_SENDER_EMAIL` | Optional |
 
 Create a secret:
@@ -204,11 +204,11 @@ Attach secret to Cloud Run revision:
 
 The Cloud Run runtime service account needs at least:
 
-| IAM Role | Why It Is Needed |
-| --- | --- |
-| `Secret Manager Secret Accessor` | Read runtime secrets during startup/runtime. |
-| `Cloud Datastore User` | Access Firestore data APIs. |
-| `Storage Object Admin` | Read/write objects for encrypted blobs and export bundles. |
+| IAM Role                         | Why It Is Needed                                           |
+| -------------------------------- | ---------------------------------------------------------- |
+| `Secret Manager Secret Accessor` | Read runtime secrets during startup/runtime.               |
+| `Cloud Datastore User`           | Access Firestore data APIs.                                |
+| `Storage Object Admin`           | Read/write objects for encrypted blobs and export bundles. |
 
 Apply roles to the service account assigned to the backend Cloud Run service.
 
@@ -219,10 +219,10 @@ The backend expects Firebase Admin credentials to be available as a mounted secr
 Steps:
 
 1. In Firebase Console -> **Project settings -> Service accounts**, generate private key JSON.
-2. Save as `firebase_admin_key.json`.
+2. Save as `firebase-admin-key.json`.
 3. Upload this JSON into Secret Manager (recommended) or secure secret storage.
 4. Mount the secret file into Cloud Run as a volume so it resolves at:
-   - `/backend/secrets/firebase_admin_key.json`
+   - `/backend/secrets/firebase-admin-key.json`
 
 For local Docker testing, mount from host:
 
