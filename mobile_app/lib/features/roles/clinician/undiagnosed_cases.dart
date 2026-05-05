@@ -14,9 +14,25 @@ class UndiagnosedCasesScreen extends StatefulWidget {
 
 class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
   bool _isLoading = false;
+  bool _isLoadingMore = false;
   String? _message;
   final List<Map<String, dynamic>> _cases = [];
   bool _isCancelled = false;
+
+  // Filter parameters
+  int _currentLimit = 50; // Start with 50, can load more
+  int _daysBack = 30; // Default to 30 days
+  int _totalLoaded = 0;
+  bool _hasMore = true; // Assume there might be more cases initially
+
+  // Date range options
+  final List<Map<String, dynamic>> _dateRangeOptions = [
+    {'label': 'Last 7 days', 'value': 7},
+    {'label': 'Last 30 days', 'value': 30},
+    {'label': 'Last 90 days', 'value': 90},
+    {'label': 'Last 180 days', 'value': 180},
+    {'label': 'Last year', 'value': 365},
+  ];
 
   @override
   void initState() {
@@ -31,14 +47,19 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
     super.dispose();
   }
 
-  Future<void> _loadCases() async {
+  Future<void> _loadCases({bool refresh = true}) async {
     try {
       // Reset cancellation flag when starting a new load
       _isCancelled = false;
 
       setState(() {
         _isLoading = true;
-        _cases.clear();
+        if (refresh) {
+          _cases.clear();
+          _totalLoaded = 0;
+          _hasMore = true;
+        }
+        _message = null;
       });
 
       final prefs = await SharedPreferences.getInstance();
@@ -50,8 +71,10 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
         throw Exception("User ID not found. Please log in and try again.");
       }
 
-      await DbManagerService.getUndiagnosedCases(
+      final newCases = await DbManagerService.getUndiagnosedCases(
         clinicianID: userId,
+        limit: _currentLimit,
+        daysBack: _daysBack,
         onCaseProcessed: (caseResult) {
           // Progressive rendering: add each case as it's ready
           if (!_isCancelled && mounted && !caseResult.containsKey("error")) {
@@ -64,6 +87,15 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
 
       // Check if loading was cancelled before final update
       if (_isCancelled) return;
+
+      // Update pagination state
+      if (mounted) {
+        setState(() {
+          _totalLoaded = _cases.length;
+          // If we got fewer cases than requested, there are no more
+          _hasMore = newCases.length >= _currentLimit;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -75,6 +107,58 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  Future<void> _loadMoreCases() async {
+    if (_isLoadingMore || !_hasMore || _isLoading) return;
+
+    try {
+      setState(() => _isLoadingMore = true);
+
+      final prefs = await SharedPreferences.getInstance();
+      final String userId =
+          prefs.getString("userId") ??
+          FirebaseAuth.instance.currentUser?.uid ??
+          "unknown";
+
+      // Increase limit to fetch more cases
+      final newLimit = _currentLimit + 50;
+
+      final allCases = await DbManagerService.getUndiagnosedCases(
+        clinicianID: userId,
+        limit: newLimit,
+        daysBack: _daysBack,
+      );
+
+      if (mounted && !_isCancelled) {
+        setState(() {
+          _cases.clear();
+          _cases.addAll(allCases);
+          _currentLimit = newLimit;
+          _totalLoaded = allCases.length;
+          // Check if we got all available cases
+          _hasMore = allCases.length >= newLimit;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error loading more cases: $e")),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingMore = false);
+      }
+    }
+  }
+
+  void _changeDateRange(int days) {
+    setState(() {
+      _daysBack = days;
+      _currentLimit = 50; // Reset limit when changing date range
+    });
+    _loadCases(refresh: true);
   }
 
   Future<void> _openDiagnoseCase({
@@ -193,6 +277,79 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
               )
             : Column(
                 children: [
+                  // Date Range Filter
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceContainerHighest,
+                      border: Border(
+                        bottom: BorderSide(
+                          color: colorScheme.outlineVariant,
+                          width: 1,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.filter_list,
+                              size: 18,
+                              color: colorScheme.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              "Filter by date range:",
+                              style: Theme.of(context).textTheme.labelLarge
+                                  ?.copyWith(
+                                    color: colorScheme.onSurface,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: _dateRangeOptions.map((option) {
+                              final isSelected =
+                                  _daysBack == option['value'] as int;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: FilterChip(
+                                  label: Text(option['label'] as String),
+                                  selected: isSelected,
+                                  onSelected: _isLoading
+                                      ? null
+                                      : (_) => _changeDateRange(
+                                            option['value'] as int,
+                                          ),
+                                  selectedColor:
+                                      colorScheme.primaryContainer,
+                                  checkmarkColor: colorScheme.primary,
+                                  labelStyle: TextStyle(
+                                    color: isSelected
+                                        ? colorScheme.primary
+                                        : colorScheme.onSurface,
+                                    fontWeight: isSelected
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Case Count Info
                   if (_cases.isNotEmpty)
                     Container(
                       padding: const EdgeInsets.symmetric(
@@ -236,24 +393,49 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         if (isTablet) {
-                          return GridView.builder(
+                          return SingleChildScrollView(
                             padding: const EdgeInsets.all(16),
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: crossAxisCount,
-                                  childAspectRatio: 2.5,
-                                  crossAxisSpacing: 16,
-                                  mainAxisSpacing: 16,
+                            child: Column(
+                              children: [
+                                GridView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  gridDelegate:
+                                      SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: crossAxisCount,
+                                        childAspectRatio: 2.5,
+                                        crossAxisSpacing: 16,
+                                        mainAxisSpacing: 16,
+                                      ),
+                                  itemCount: _cases.length,
+                                  itemBuilder: (context, index) {
+                                    final caseInfo = _cases[index];
+                                    return _buildCaseCard(
+                                      caseInfo,
+                                      index,
+                                      colorScheme,
+                                    );
+                                  },
                                 ),
-                            itemCount: _cases.length,
-                            itemBuilder: (context, index) {
-                              final caseInfo = _cases[index];
-                              return _buildCaseCard(
-                                caseInfo,
-                                index,
-                                colorScheme,
-                              );
-                            },
+                                if (_hasMore && !_isLoading) ...[
+                                  const SizedBox(height: 24),
+                                  _buildLoadMoreButton(colorScheme),
+                                ],
+                                if (_isLoadingMore) ...[
+                                  const SizedBox(height: 24),
+                                  CircularProgressIndicator(
+                                    color: colorScheme.primary,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    "Loading more cases...",
+                                    style: Theme.of(context).textTheme.bodyMedium
+                                        ?.copyWith(color: Colors.grey[600]),
+                                  ),
+                                ],
+                                const SizedBox(height: 80), // Space for FAB
+                              ],
+                            ),
                           );
                         } else {
                           return ListView.builder(
@@ -261,8 +443,36 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
                               horizontal: 16,
                               vertical: 8,
                             ),
-                            itemCount: _cases.length,
+                            itemCount: _cases.length + (_hasMore ? 1 : 0),
                             itemBuilder: (context, index) {
+                              if (index == _cases.length) {
+                                // Load more button at the end
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 16,
+                                  ),
+                                  child: _isLoadingMore
+                                      ? Center(
+                                          child: Column(
+                                            children: [
+                                              CircularProgressIndicator(
+                                                color: colorScheme.primary,
+                                              ),
+                                              const SizedBox(height: 12),
+                                              Text(
+                                                "Loading more cases...",
+                                                style: Theme.of(context)
+                                                    .textTheme.bodyMedium
+                                                    ?.copyWith(
+                                                      color: Colors.grey[600],
+                                                    ),
+                                              ),
+                                            ],
+                                          ),
+                                        )
+                                      : _buildLoadMoreButton(colorScheme),
+                                );
+                              }
                               final caseInfo = _cases[index];
                               return Padding(
                                 padding: const EdgeInsets.only(bottom: 12),
@@ -398,6 +608,32 @@ class _UndiagnosedCasesScreenState extends State<UndiagnosedCasesScreen> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadMoreButton(ColorScheme colorScheme) {
+    return Center(
+      child: OutlinedButton.icon(
+        onPressed: _isLoadingMore ? null : _loadMoreCases,
+        icon: const Icon(Icons.expand_more),
+        label: Text(
+          "Load More Cases (${_cases.length} loaded)",
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(
+            horizontal: 24,
+            vertical: 12,
+          ),
+          side: BorderSide(
+            color: colorScheme.primary,
+            width: 2,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
           ),
         ),
       ),

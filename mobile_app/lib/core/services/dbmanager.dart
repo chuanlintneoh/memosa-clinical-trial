@@ -179,7 +179,7 @@ class DbManagerService {
 
       final url = Uri.parse("$_baseUrl/case/edit?case_id=$caseId");
       final body = jsonEncode(caseData.toJson());
-      final response = await http.post(
+      final response = await http.patch(
         url,
         headers: {'Content-Type': 'application/json', 'Authorization': idToken},
         body: body,
@@ -252,6 +252,8 @@ class DbManagerService {
   static Future<List<Map<String, dynamic>>> getUndiagnosedCases({
     required String clinicianID,
     Function(Map<String, dynamic>)? onCaseProcessed,
+    int? limit,
+    int? daysBack,
   }) async {
     // Clinician retrieves undiagnosed cases
     try {
@@ -262,7 +264,14 @@ class DbManagerService {
 
       final String idToken = await AuthService.authorize();
 
-      final url = Uri.parse("$_baseUrl/cases/undiagnosed/$clinicianID");
+      // Build URL with optional query parameters
+      final queryParams = <String, String>{};
+      if (limit != null) queryParams['limit'] = limit.toString();
+      if (daysBack != null) queryParams['days_back'] = daysBack.toString();
+
+      final url = Uri.parse(
+        "$_baseUrl/cases/undiagnosed/$clinicianID",
+      ).replace(queryParameters: queryParams.isEmpty ? null : queryParams);
       final response = await http.get(url, headers: {'Authorization': idToken});
 
       if (response.statusCode != 200) {
@@ -323,7 +332,7 @@ class DbManagerService {
 
       final url = Uri.parse("$_baseUrl/case/diagnose?case_id=$caseId");
       final body = jsonEncode(diagnoses.toJson());
-      final response = await http.post(
+      final response = await http.patch(
         url,
         headers: {'Content-Type': 'application/json', 'Authorization': idToken},
         body: body,
@@ -353,7 +362,10 @@ class DbManagerService {
       final String idToken = await AuthService.authorize();
 
       final url = Uri.parse("$_baseUrl/bundle/export?include_all=$includeAll");
-      final response = await http.get(url, headers: {'Authorization': idToken});
+      final response = await http.post(
+        url,
+        headers: {'Authorization': idToken},
+      );
 
       return jsonDecode(response.body);
     } catch (e) {

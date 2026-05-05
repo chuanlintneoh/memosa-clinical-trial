@@ -2,9 +2,9 @@ from fastapi import APIRouter, HTTPException, Request
 from firebase_admin import auth, firestore
 
 from app.api.auth import verify_token
+from app.api.invite_manager import InviteManager
 from app.core.firebase import db
 from app.models.user import RegisterUser
-from app.services.invite_code_service import InviteCodeService
 
 auth_router = APIRouter()
 
@@ -12,7 +12,7 @@ auth_router = APIRouter()
 def register_user(data: RegisterUser):
     try:
         # Validate invite code first
-        is_valid, error_message = InviteCodeService.validate_code(
+        is_valid, error_message = InviteManager.validate_code(
             code=data.invite_code,
             email=data.email,
             role=data.role.value
@@ -29,7 +29,7 @@ def register_user(data: RegisterUser):
         )
 
         # Consume the invite code (increment usage count)
-        InviteCodeService.consume_code(data.invite_code, user.uid)
+        InviteManager.consume_code(data.invite_code, user.uid)
 
         # Store role as custom user claim
         auth.set_custom_user_claims(user.uid, {"role": data.role.value})
@@ -51,14 +51,13 @@ def register_user(data: RegisterUser):
         }
 
         return response_data
-    except HTTPException:
-        raise
     except Exception as e:
+        print(f"[Auth Routes] Error registering email {data.email}: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @auth_router.get("/login")
 def login_user(request: Request):
-    uid, role, email, _ = verify_token(request)
+    uid, role, email, _, _ = verify_token(request)
     try:
         user_doc = db.collection("users").document(uid).get()
         if not user_doc.exists:
@@ -74,4 +73,5 @@ def login_user(request: Request):
         }
         return response
     except Exception as e:
+        print(f"[Auth Routes] Error logging in user {uid}: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e))

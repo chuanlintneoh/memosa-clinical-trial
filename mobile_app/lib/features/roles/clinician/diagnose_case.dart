@@ -202,7 +202,8 @@ class _DiagnoseCaseScreenState extends State<DiagnoseCaseScreen> {
   void _populateData() {
     if (_caseData == null) return;
 
-    _caseIdController.text = _processedCaseInfo?["case_id"] ?? widget.caseInfo["case_id"] ?? "";
+    _caseIdController.text =
+        _processedCaseInfo?["case_id"] ?? widget.caseInfo["case_id"] ?? "";
     _createdAtController.text = _caseData!.createdAt;
     _submittedAtController.text = _caseData!.submittedAt;
     _createdByController.text = _caseData!.createdBy;
@@ -733,16 +734,31 @@ class _DiagnoseCaseScreenState extends State<DiagnoseCaseScreen> {
                 _clinicalDiagnoses[_selectedImageIndex] =
                     _lesionDataManager.nullClinicalDiagnosis;
               } else {
-                // Check if current diagnosis belongs to new lesion type
-                final currentDiagnosis =
-                    _clinicalDiagnoses[_selectedImageIndex];
-                if (!_lesionDataManager.diagnosisBelongsToLesionType(
-                  currentDiagnosis,
-                  val,
-                )) {
-                  // Reset to NULL if diagnosis doesn't belong to new lesion type
+                final validDiagnoses = _lesionDataManager
+                    .getClinicalDiagnosesForLesionType(val);
+
+                final actualDiagnosis = validDiagnoses
+                    .where(
+                      (d) =>
+                          d.key != _lesionDataManager.nullClinicalDiagnosis.key,
+                    )
+                    .toList();
+
+                if (actualDiagnosis.length == 1) {
                   _clinicalDiagnoses[_selectedImageIndex] =
-                      _lesionDataManager.nullClinicalDiagnosis;
+                      actualDiagnosis.first;
+                } else {
+                  // Check if current diagnosis belongs to new lesion type
+                  final currentDiagnosis =
+                      _clinicalDiagnoses[_selectedImageIndex];
+                  if (!_lesionDataManager.diagnosisBelongsToLesionType(
+                    currentDiagnosis,
+                    val,
+                  )) {
+                    // Reset to NULL if diagnosis doesn't belong to new lesion type
+                    _clinicalDiagnoses[_selectedImageIndex] =
+                        _lesionDataManager.nullClinicalDiagnosis;
+                  }
                 }
               }
             });

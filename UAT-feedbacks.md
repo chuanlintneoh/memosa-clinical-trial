@@ -1,4 +1,6 @@
-# BUGS
+# UAT v0.1.0
+
+## BUGS
 
 1. /Tested /Resolved [BUG] Study coordinator, create case page - words at top of page are cut off - SC (including edit case, diagnose case)
 2. /Tested /Resolved [BUG] Some text gets cut off on diagnose case screen, e.g. gender field - SC (hide copy button for a lot of text fields)
@@ -12,7 +14,7 @@
 10. /Tested /Resolved [BUG] Missing created at and created by field data in diagnose case screen
 11. /Tested /Resolved [BUG] Pixel overflow in my invite codes, admin invite code manager screen
 
-# ENHANCEMENTS
+## ENHANCEMENTS
 
 1. /Tested /Resolved [ENHANCEMENT] Diagnose case - do not need to make all fields copy-able - SC (same item as previous resolved bug)
 2. /Tested /Resolved [ENHANCEMENT] Should be able to enlarge image when reviewing - AN (edit case & diagnose case)
@@ -36,9 +38,27 @@
 20. /Nofix [ENHANCEMENT] Case submission and export bundle takes a while - AN
 21. /Tested /Resolved [ENHANCEMENT] Make consent form, biopsy reports also zoomable?
 
-# OTHERS
+## OTHERS
 
 /Nofix [BUG] Cannot find cases after submission - SC (TBC)
 /Nofix [BUG] Search not working - SC, AN [see screenshot] (TBC)
 /Nofix [BUG] Could not test case editing, as cannot search cases after submitting because search not working - SC, AN (TBC)
 /Nofix [BUG] I don't see the cases that I submitted with the study coordinator account. Am I supposed to? - SC,AN (TBC)
+
+# UAT v0.2.0
+
+## BUGS
+
+1. /Improved [BUG] Study coordinator edit case does not reflect directly (Fix: respond first, then write to Firestore in the background > write to Firestore first, then respond)
+2. /Improved [BUG] Study coordinator unable to find created case (happened on 8/12 around 3pm by Sara) (Fix: wait AI inference, then batch write case data & AI results > write case data to Firestore first, batch update AI results after AI inference)
+3. /Nofix (Intended behaviour) [BUG] Name text input should not allow apostrophes (')
+4. /Improved [BUG] Concurrency: Multiple users doing same action at the same time may cause conflicts (Moved heavy tasks to non-blocking background worker)
+
+## ENHANCEMENTS
+
+1. /Tested /Resolved [ENHANCEMENT] Update model to latest / best performing + threshold setting
+2. /Tested /Resolved [ENHANCEMENT] No Lesion -> Normal Mucosa (add condition if lesion type consist of 1 clinical diagnosis, auto assign to it)
+3. /Tested /Resolved [ENHANCEMENT] UserManager (get, list, edit, soft/hard delete, reactivate user)
+   Test: Generate invite code > Register new clinician > Login clinician > Logout & Login admin > Edit user (name, email) > Logout & Login clinician > Logout & Login admin > Edit user (name, role, email) > Logout & Login clinician > Logout & Login admin > soft delete clinician > Logout & try Login clinician > Login admin > reactivate clinician > Logout & login clinician > Logout & login admin > hard delete clinician > Logout & try login clinician
+4. /Resolved [ENHANCEMENT] Write comprehensive documentation
+5. [ENHANCEMENT] Refactor MeMoSA Clinical Platform > MeMoSA Clinical Trial

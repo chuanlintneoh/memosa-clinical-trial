@@ -1,12 +1,12 @@
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any
 from firebase_admin import firestore
+from typing import List, Optional, Dict, Any
+
 from app.core.firebase import db
 
-
-class InviteCodeService:
+class InviteManager:
     """Service for managing invite codes in Firestore"""
 
     COLLECTION_NAME = "invite_codes"
@@ -18,7 +18,7 @@ class InviteCodeService:
         alphabet = string.ascii_uppercase + string.digits
         # Remove ambiguous characters (0, O, 1, I, L)
         alphabet = alphabet.replace('0', '').replace('O', '').replace('1', '').replace('I', '').replace('L', '')
-        return ''.join(secrets.choice(alphabet) for _ in range(InviteCodeService.CODE_LENGTH))
+        return ''.join(secrets.choice(alphabet) for _ in range(InviteManager.CODE_LENGTH))
 
     @staticmethod
     def create_invite_code(
@@ -41,7 +41,7 @@ class InviteCodeService:
         Returns:
             Dictionary containing the created invite code data
         """
-        code = InviteCodeService.generate_code()
+        code = InviteManager.generate_code()
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(days=expires_in_days)
 
@@ -59,7 +59,7 @@ class InviteCodeService:
         }
 
         # Store in Firestore using the code as document ID
-        db.collection(InviteCodeService.COLLECTION_NAME).document(code).set(invite_data)
+        db.collection(InviteManager.COLLECTION_NAME).document(code).set(invite_data)
 
         return invite_data
 
@@ -77,7 +77,7 @@ class InviteCodeService:
             Tuple of (is_valid, error_message)
         """
         try:
-            doc = db.collection(InviteCodeService.COLLECTION_NAME).document(code).get()
+            doc = db.collection(InviteManager.COLLECTION_NAME).document(code).get()
 
             if not doc.exists:
                 return False, "Invalid invite code"
@@ -125,7 +125,7 @@ class InviteCodeService:
             True if successful, False otherwise
         """
         try:
-            doc_ref = db.collection(InviteCodeService.COLLECTION_NAME).document(code)
+            doc_ref = db.collection(InviteManager.COLLECTION_NAME).document(code)
             doc = doc_ref.get()
 
             if not doc.exists:
@@ -158,7 +158,7 @@ class InviteCodeService:
         Returns:
             List of invite code dictionaries
         """
-        query = db.collection(InviteCodeService.COLLECTION_NAME)
+        query = db.collection(InviteManager.COLLECTION_NAME)
 
         if created_by_uid:
             query = query.where("created_by", "==", created_by_uid)
@@ -186,7 +186,7 @@ class InviteCodeService:
             True if successful, False otherwise
         """
         try:
-            doc_ref = db.collection(InviteCodeService.COLLECTION_NAME).document(code)
+            doc_ref = db.collection(InviteManager.COLLECTION_NAME).document(code)
             doc = doc_ref.get()
 
             if not doc.exists:
@@ -211,7 +211,7 @@ class InviteCodeService:
             Dictionary with code details or None if not found
         """
         try:
-            doc = db.collection(InviteCodeService.COLLECTION_NAME).document(code).get()
+            doc = db.collection(InviteManager.COLLECTION_NAME).document(code).get()
 
             if not doc.exists:
                 return None

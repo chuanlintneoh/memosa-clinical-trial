@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from app.api.auth import verify_token
 from app.api.bootstrap import dbmanager
+from app.models.user import UserRole
 
 dbmanager_router = APIRouter()
 
@@ -15,10 +16,10 @@ async def create_case(
     background_tasks: BackgroundTasks,
     case_id: str = Query(...)
 ):
-    uid, role, _, _ = verify_token(request)
-    if role != "study_coordinator":
+    uid, role, _, _, verified = verify_token(request, UserRole.study_coordinator)
+    if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
-    
+
     try:
         # 1. receives case data
         data: Dict[str, Any] = await request.json()
@@ -30,41 +31,36 @@ async def create_case(
         encrypted_aes = data.get("encrypted_aes", {})
         if not encrypted_aes:
             return JSONResponse(content={"error": "Missing encrypted AES key"}, status_code=400)
+        
+        # 3. write to firestore
+        case_id = dbmanager.create_case(case_id, data)
 
-        # 3. ensure case_id is unique
-        case_id = dbmanager.uniquify_id(case_id)
-
-        # 4. store case in cache
-        dbmanager.pending_cases[case_id] = data
-
-        # 5. queue job for AI diagnosis
+        # 4. queue job for AI diagnosis
         background_tasks.add_task(dbmanager.enqueue_ai_job, case_id, data)
 
         return JSONResponse(content={"case_id": case_id}, status_code=200)
-
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @dbmanager_router.get("/case/get/{case_id}")
 def get_case(case_id: str, request: Request):
-    _, role, _, _ = verify_token(request)
-    if role != "study_coordinator":
+    _, role, _, _, verified = verify_token(request, UserRole.study_coordinator)
+    if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
     return dbmanager.get_case_by_id(case_id)
 
-@dbmanager_router.post("/case/edit")
+@dbmanager_router.patch("/case/edit")
 async def edit_case(
     request: Request,
-    background_tasks: BackgroundTasks,
     case_id: str = Query(...)
 ):
-    _, role, _, _ = verify_token(request)
-    if role != "study_coordinator":
+    _, role, _, _, verified = verify_token(request, UserRole.study_coordinator)
+    if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
 
     updates = await request.json()
-    background_tasks.add_task(dbmanager.edit_case_by_id, case_id, updates)
-    return JSONResponse(content={"case_id": case_id}, status_code=200)
+    case_id, status = dbmanager.edit_case_by_id(case_id, updates)
+    return JSONResponse(content={"case_id": case_id, "status": status}, status_code=200)
 
 @dbmanager_router.get("/cases/list")
 def list_cases(
@@ -94,8 +90,8 @@ def list_cases(
             "has_more": boolean
         }
     """
-    uid, role, _, _ = verify_token(request)
-    if role != "study_coordinator":
+    uid, role, _, _, verified = verify_token(request, UserRole.study_coordinator)
+    if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
 
     try:
@@ -115,19 +111,18 @@ def list_cases(
 
 @dbmanager_router.get("/cases/undiagnosed/{clinician_id}")
 def get_undiagnosed_cases(clinician_id: str, request: Request):
-    uid, role, _, _ = verify_token(request)
-    if uid != clinician_id or role != "clinician":
+    uid, role, _, _, verified = verify_token(request, UserRole.clinician)
+    if uid != clinician_id or not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
     return dbmanager.get_undiagnosed_cases(clinician_id)
 
-@dbmanager_router.post("/case/diagnose")
+@dbmanager_router.patch("/case/diagnose")
 async def diagnose_case(
     request: Request,
-    background_tasks: BackgroundTasks,
     case_id: str = Query(...)
 ):
-    uid, role, _, _ = verify_token(request)
-    if role != "clinician":
+    uid, role, _, _, verified = verify_token(request, UserRole.clinician)
+    if not verified:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
 
     body = await request.json()
@@ -136,12 +131,8 @@ async def diagnose_case(
     if not filtered:
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
 
-    background_tasks.add_task(dbmanager.submit_case_diagnosis, case_id, filtered)
-    return JSONResponse(content={"case_id": case_id}, status_code=200)
-
-# @dbmanager_router.get("/cases/all")
-# def get_all_cases():
-#     return dbmanager.get_all_cases()
+    case_id, status = dbmanager.submit_case_diagnosis(case_id, filtered)
+    return JSONResponse(content={"case_id": case_id, "status": status}, status_code=200)
 
 # @dbmanager_router.get("/cases/export")
 # async def export_mastersheet(include_all: bool = False):
@@ -152,11 +143,14 @@ async def diagnose_case(
 #         headers={"Content-Disposition": f"attachment; filename=mastersheet_{timestamp}.xlsx"}
 #     )
 
-@dbmanager_router.get("/bundle/export")
+@dbmanager_router.post("/bundle/export")
 async def export_bundle(request: Request, include_all: bool = False, expiry_days: int = 1):
-    _, role, _, _ = verify_token(request)
-    if role != "admin":
+    user_id, role, _, _, verified = verify_token(request, UserRole.admin)
+    if not verified:
+        print(f"[DbManager Routes] Rejected request from user ({role}) {user_id} to export bundle")
         return JSONResponse(content={"error": "Unauthorized"}, status_code=403)
+
+    print(f"[DbManager Routes] Received and processing request from {role} user ({role}) {user_id} to export bundle")
     
     try:
         url, password, timestamp = await dbmanager.export_bundle(include_all=include_all, signed_url=True, expiry_seconds=expiry_days * 24 * 3600)

@@ -15,4 +15,9 @@ FIREBASE_BUCKET_NAME = os.getenv("FIREBASE_BUCKET_NAME")
 if GOOGLE_CLOUD_RUN:
     AI_URL = os.getenv("AI_URL")
 else:
-    AI_URL = "http://localhost:8001"
+    if os.path.exists('/.dockerenv'):
+        print("[Config] Detected Backend is in Docker")
+        AI_URL = "http://host.docker.internal:8001"
+    else:
+        print("[Config] Assumed Backend is on Host")
+        AI_URL = "http://localhost:8001"

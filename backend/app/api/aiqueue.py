@@ -21,6 +21,7 @@ class AIQueue:
         retry_backoff_base: float = 2.0
     ):
         self.dbmanager = dbmanager
+        self.IMAGES_PER_CASE = 9
         self._new_cases: Dict[str, Dict[str, Any]] = {} # Cases waiting to be flushed
         self._flush_interval_seconds = flush_interval_seconds
         self._flush_maximum_cases = flush_maximum_cases
@@ -64,8 +65,8 @@ class AIQueue:
         case_to_slice = {}
         for case_id, case_data in flush_data.items():
             start_idx = len(all_images)
-            all_images.extend(case_data["images"])  # Adds 9 images
-            case_to_slice[case_id] = (start_idx, start_idx + 9)
+            all_images.extend(case_data["images"])
+            case_to_slice[case_id] = (start_idx, start_idx + self.IMAGES_PER_CASE)
 
         image_payload = []
         for img in all_images:

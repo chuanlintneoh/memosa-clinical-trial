@@ -999,7 +999,11 @@ class _EditCaseScreenState extends State<EditCaseScreen> {
           copiable: true,
         ),
         const SizedBox(height: 16),
-        _buildTextField(_chiefComplaintController, "Chief Complaint", copiable: true),
+        _buildTextField(
+          _chiefComplaintController,
+          "Chief Complaint",
+          copiable: true,
+        ),
         const SizedBox(height: 16),
         _buildTextField(
           _presentingComplaintHistoryController,
@@ -1007,9 +1011,17 @@ class _EditCaseScreenState extends State<EditCaseScreen> {
           copiable: true,
         ),
         const SizedBox(height: 16),
-        _buildTextField(_medicationHistoryController, "Medication History", copiable: true),
+        _buildTextField(
+          _medicationHistoryController,
+          "Medication History",
+          copiable: true,
+        ),
         const SizedBox(height: 16),
-        _buildTextField(_medicalHistoryController, "Medical History", copiable: true),
+        _buildTextField(
+          _medicalHistoryController,
+          "Medical History",
+          copiable: true,
+        ),
       ],
     );
   }
@@ -1224,16 +1236,31 @@ class _EditCaseScreenState extends State<EditCaseScreen> {
                 _coeClinicalDiagnoses[_selectedImageIndex] =
                     _lesionDataManager.nullClinicalDiagnosis;
               } else {
-                // Check if current diagnosis belongs to new lesion type
-                final currentDiagnosis =
-                    _coeClinicalDiagnoses[_selectedImageIndex];
-                if (!_lesionDataManager.diagnosisBelongsToLesionType(
-                  currentDiagnosis,
-                  val,
-                )) {
-                  // Reset to NULL if diagnosis doesn't belong to new lesion type
+                final validDiagnoses = _lesionDataManager
+                    .getClinicalDiagnosesForLesionType(val);
+
+                final actualDiagnoses = validDiagnoses
+                    .where(
+                      (d) =>
+                          d.key != _lesionDataManager.nullClinicalDiagnosis.key,
+                    )
+                    .toList();
+
+                if (actualDiagnoses.length == 1) {
                   _coeClinicalDiagnoses[_selectedImageIndex] =
-                      _lesionDataManager.nullClinicalDiagnosis;
+                      actualDiagnoses.first;
+                } else {
+                  // Check if current diagnosis belongs to new lesion type
+                  final currentDiagnosis =
+                      _coeClinicalDiagnoses[_selectedImageIndex];
+                  if (!_lesionDataManager.diagnosisBelongsToLesionType(
+                    currentDiagnosis,
+                    val,
+                  )) {
+                    // Reset to NULL if diagnosis doesn't belong to new lesion type
+                    _coeClinicalDiagnoses[_selectedImageIndex] =
+                        _lesionDataManager.nullClinicalDiagnosis;
+                  }
                 }
               }
 
@@ -1294,16 +1321,31 @@ class _EditCaseScreenState extends State<EditCaseScreen> {
                 _biopsyClinicalDiagnoses[_selectedImageIndex] =
                     _lesionDataManager.nullClinicalDiagnosis;
               } else {
-                // Check if current diagnosis belongs to new lesion type
-                final currentDiagnosis =
-                    _biopsyClinicalDiagnoses[_selectedImageIndex];
-                if (!_lesionDataManager.diagnosisBelongsToLesionType(
-                  currentDiagnosis,
-                  val,
-                )) {
-                  // Reset to NULL if diagnosis doesn't belong to new lesion type
+                final validDiagnoses = _lesionDataManager
+                    .getClinicalDiagnosesForLesionType(val);
+
+                final actualDiagnoses = validDiagnoses
+                    .where(
+                      (d) =>
+                          d.key != _lesionDataManager.nullClinicalDiagnosis.key,
+                    )
+                    .toList();
+
+                if (actualDiagnoses.length == 1) {
                   _biopsyClinicalDiagnoses[_selectedImageIndex] =
-                      _lesionDataManager.nullClinicalDiagnosis;
+                      actualDiagnoses.first;
+                } else {
+                  // Check if current diagnosis belongs to new lesion type
+                  final currentDiagnosis =
+                      _biopsyClinicalDiagnoses[_selectedImageIndex];
+                  if (!_lesionDataManager.diagnosisBelongsToLesionType(
+                    currentDiagnosis,
+                    val,
+                  )) {
+                    // Reset to NULL if diagnosis doesn't belong to new lesion type
+                    _biopsyClinicalDiagnoses[_selectedImageIndex] =
+                        _lesionDataManager.nullClinicalDiagnosis;
+                  }
                 }
               }
 
@@ -1610,7 +1652,11 @@ class _EditCaseScreenState extends State<EditCaseScreen> {
                     top: 10,
                     right: 10,
                     child: IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white, size: 30),
+                      icon: const Icon(
+                        Icons.close,
+                        color: Colors.white,
+                        size: 30,
+                      ),
                       onPressed: () => Navigator.of(ctx).pop(),
                     ),
                   ),

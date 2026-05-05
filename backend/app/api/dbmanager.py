@@ -1,13 +1,14 @@
 from datetime import datetime, timedelta
 from google.cloud import firestore
+from google.cloud.exceptions import Conflict
 from io import BytesIO
 from nanoid import generate
 from pathlib import Path
 from PIL import Image
-# from sendgrid import SendGridAPIClient
-# from sendgrid.helpers.mail import Attachment, Disposition, FileContent, FileName, FileType, Mail
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import asyncio
 import base64
+import httpx
 import json
 import pandas as pd
 import pyzipper
@@ -26,65 +27,104 @@ from app.core.firebase import bucket, db
 class DbManager:
     def __init__(self, aiqueue):
         self.aiqueue = aiqueue
-        self.pending_cases: Dict[str, Dict[str, Any]] = {}  # Data of cases that have already been sent to AIQueue
+        self.COLLECTION_NAME = "cases"
+        self.CASE_ID_LENGTH = 8 # Consistent with client-side Case ID generation
+        self.AI_STATUS_PENDING = "NULL"
+        self.IMAGES_PER_CASE = 9
 
-    def uniquify_id(self, case_id: str, max_trials: int = 5, size: int = 8) -> str:
-        doc_ref = db.collection("cases").document(case_id)
-        trial = 0
+    def create_case(self, case_id: str, case_data: Dict[str, Any]) -> str:
+        try:
+            case_data["diagnoses"] = self._mark_ai_results_pending(case_data.get("diagnoses"))
+            case_data["submitted_at"] = firestore.SERVER_TIMESTAMP
+            doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
+            try:
+                doc_ref.create(case_data)
+                print(f"[DbManager] Wrote case {case_id} to Firestore")
+                return case_id
+            except Conflict:
+                print(f"[DbManager] Case ID {case_id} already exists, generating new id")
+                new_id = generate(size=self.CASE_ID_LENGTH)
+                print(f"[DbManager] New case ID {new_id} generated to replace {case_id}")
+                db.collection(self.COLLECTION_NAME).document(new_id).create(case_data)
+                print(f"[DbManager] Wrote case {new_id} to Firestore")
+                return new_id
+        except Exception as e:
+            print(f"[DbManager] Error creating case {case_id}: {str(e)}")
+            raise Exception(f"Failed to create case: {str(e)}")
 
-        while (doc_ref.get().exists or case_id in self.pending_cases) and trial < max_trials:
-            print(f"[DbManager] Collision detected for {case_id}, generating a new one (trial {trial+1})")
-            case_id = generate(size=size)
-            print(f"[DbManager] Generated new case ID: {case_id}")
-            doc_ref = db.collection("cases").document(case_id)
-            trial += 1
+    def _mark_ai_results_pending(self, diagnoses: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """
+        Marking AI status as pending.
+        """
+        default_diag = {
+            "ai_lesion_type": self.AI_STATUS_PENDING,
+            "biopsy_clinical_diagnosis": "NULL",
+            "biopsy_lesion_type": "NULL",
+            "biopsy_report": {"url": "NULL", "iv": "NULL", "fileType": "NULL"},
+            "coe_clinical_diagnosis": "NULL",
+            "coe_lesion_type": "NULL",
+        }
 
-        if trial == max_trials and (doc_ref.get().exists or case_id in self.pending_cases):
-            print(f"[DbManager] Failed to generate unique case ID after {trial} trials")
-            raise ValueError(f"Failed to generate unique case ID after {trial} trials")
+        if not isinstance(diagnoses, list) or len(diagnoses) == 0:
+            return [dict(default_diag) for _ in range(self.IMAGES_PER_CASE)]
 
-        return case_id
+        pending_diagnoses: List[Dict[str, Any]] = []
+        for diag in diagnoses:
+            if not isinstance(diag, dict):
+                pending_diagnoses.append(dict(default_diag))
+                continue
 
-    def enqueue_ai_job(self, case_id: str, case_data: Dict[str, Any]):
+            diag_copy = dict(diag)
+            ai_value = diag_copy.get("ai_lesion_type")
+            if ai_value in (None, "", "NULL"):
+                diag_copy["ai_lesion_type"] = self.AI_STATUS_PENDING
+            pending_diagnoses.append(diag_copy)
+
+        return pending_diagnoses
+
+    async def enqueue_ai_job(self, case_id: str, case_data: Dict[str, Any]):
         # 1. download encrypted blob from Firebase Storage
         # 2. decrypt blob using aes key
         # 3. extract 9 images from decrypted blob in order
         # 4. send case_id: [9 images] to AIQueue for AI diagnosis
-        encrypted_aes = case_data.get("encrypted_aes", {})
-        ciphertext = encrypted_aes.get("ciphertext")
-        iv = encrypted_aes.get("iv")
-        salt = encrypted_aes.get("salt")
-        aes_key = CryptoUtils.decrypt_aes_key_with_passphrase(
-            encrypted_aes_key_b64=ciphertext,
-            passphrase=PASSWORD,
-            salt_b64=salt,
-            iv_b64=iv
-        )
-
         encrypted_blob = case_data.get("encrypted_blob", {})
         url = encrypted_blob.get("url", "NULL")
-        iv = encrypted_blob.get("iv", "NULL")
-        if url == "NULL" or iv == "NULL":
+        blob_iv = encrypted_blob.get("iv", "NULL")
+        if url == "NULL" or blob_iv == "NULL":
             print(f"[DbManager] Invalid encrypted blob for case {case_id}. Cannot enqueue AI job.")
             return
         print(f"[DbManager] Downloading blob from URL: {url}")
         try:
-            response = requests.get(url)
-            if response.status_code != 200:
-                raise RuntimeError(f"Failed to download blob: {response.status_code}")
-            encrypted_blob = base64.b64encode(response.content).decode('utf-8')
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=60.0)
+                if response.status_code != 200:
+                    raise RuntimeError(f"Failed to download blob: {response.status_code}")
+                encrypted_blob = base64.b64encode(response.content).decode('utf-8')
         except Exception as e:
             print(f"[DbManager] Error downloading blob for case {case_id}: {e}")
             return
         
+        encrypted_aes = case_data.get("encrypted_aes", {})
+        ciphertext = encrypted_aes.get("ciphertext")
+        key_iv = encrypted_aes.get("iv")
+        salt = encrypted_aes.get("salt")
+
+        loop = asyncio.get_event_loop()
+        aes_key = await loop.run_in_executor(None, lambda: CryptoUtils.decrypt_aes_key_with_passphrase(
+            encrypted_aes_key_b64=ciphertext,
+            passphrase=PASSWORD,
+            salt_b64=salt,
+            iv_b64=key_iv
+        ))
         print(f"[DbManager] Decrypting blob...")
-        decrypted_data = CryptoUtils.decrypt_string(
+        decrypted_data = await loop.run_in_executor(None, lambda: CryptoUtils.decrypt_string(
             encrypted_blob,
-            iv,
+            blob_iv,
             aes_key
-        )
+        ))
+
         image_b64_list = json.loads(decrypted_data).get("images", [])
-        if len(image_b64_list) != 9:
+        if len(image_b64_list) != self.IMAGES_PER_CASE:
             print(f"[DbManager] Invalid number of images for case {case_id}. Cannot enqueue AI job.")
             return
 
@@ -98,13 +138,14 @@ class DbManager:
         print(f"[DbManager] Enqueued AI job for case: {case_id}")
 
     def receive_AI_results(self, results: Dict[str, Any]):
-        new_cases = {}
+        diagnosis_updates = {}
         for case_id, predictions in results.items():
-            if case_id not in self.pending_cases:
-                print(f"[DbManager] Warning: Received AI result for unknown case_id: {case_id}")
+            case_snapshot = db.collection(self.COLLECTION_NAME).document(case_id).get()
+            if not case_snapshot.exists:
+                print(f"[DbManager] Received AI result for unknown case_id {case_id} in Firestore")
                 continue
-            case_data = self.pending_cases[case_id]
 
+            case_data = case_snapshot.to_dict()
             diagnoses = case_data.get("diagnoses", [])
             if len(diagnoses) != len(predictions):
                 print(f"[DbManager] Mismatch between diagnosis count and predictions for case {case_id}")
@@ -113,32 +154,75 @@ class DbManager:
             for i in range(len(diagnoses)):
                 diagnoses[i]["ai_lesion_type"] = predictions[i]
 
-            case_data["diagnoses"] = diagnoses
-            new_cases[case_id] = case_data
-            del self.pending_cases[case_id]
+            diagnosis_updates[case_id] = diagnoses
         
-        self._batch_write_new_cases(new_cases)
+        self._batch_write_AI_results(diagnosis_updates)
 
-    def _batch_write_new_cases(self, new_cases: Dict[str, Dict[str, Any]]):
-        print(f"[DbManager] Batch writing {len(new_cases)} cases to Firestore...")
+    def _batch_write_AI_results(self, diagnosis_updates: Dict[str, List[Dict[str, Any]]]):
+        print(f"[DbManager] Batch writing AI results for {len(diagnosis_updates)} cases to Firestore...")
         try:
             batch = db.batch()
-            for case_id, case_data in new_cases.items():
-                case_data["submitted_at"] = firestore.SERVER_TIMESTAMP
-                doc_ref = db.collection("cases").document(case_id)
-                batch.set(doc_ref, case_data)
+            for case_id, diagnoses in diagnosis_updates.items():
+                doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
+                batch.update(doc_ref, {"diagnoses": diagnoses})
             batch.commit()
-            print(f"[DbManager] Batch wrote {len(new_cases)} cases to Firestore.")
+            print(f"[DbManager] Batch wrote AI results for {len(diagnosis_updates)} cases to Firestore.")
         except Exception as e:
-            print(f"[DbManager] Error batch writing cases: {str(e)}")
+            print(f"[DbManager] Error batch writing AI results: {str(e)}")
+
+    # def requeue_pending_ai_cases(self, limit: int = 100, days_back: int = 30) -> Dict[str, Any]:
+    #     """
+    #     Re-enqueue cases whose AI status is still pending.
+    #     Intended for periodic recovery jobs run outside request/response flow.
+    #     """
+    #     print(f"[DbManager] Re-queueing pending AI cases (limit={limit}, days_back={days_back})...")
+
+    #     cutoff_date = datetime.now() - timedelta(days=days_back)
+    #     docs = db.collection(self.COLLECTION_NAME) \
+    #         .order_by("submitted_at", direction=firestore.Query.DESCENDING) \
+    #         .limit(max(limit * 5, limit)) \
+    #         .stream()
+
+    #     scanned = 0
+    #     queued = 0
+    #     requeued_case_ids: List[str] = []
+
+    #     for doc in docs:
+    #         scanned += 1
+    #         if queued >= limit:
+    #             break
+
+    #         case_data = doc.to_dict()
+    #         submitted_at = case_data.get("submitted_at")
+    #         if submitted_at and submitted_at < cutoff_date:
+    #             continue
+
+    #         diagnoses = case_data.get("diagnoses", [])
+    #         has_pending = any(
+    #             isinstance(diag, dict) and diag.get("ai_lesion_type") == self.AI_STATUS_PENDING
+    #             for diag in diagnoses
+    #         )
+    #         if not has_pending:
+    #             continue
+
+    #         self.enqueue_ai_job(doc.id, case_data)
+    #         queued += 1
+    #         requeued_case_ids.append(doc.id)
+
+    #     print(f"[DbManager] Re-queued {queued} pending cases (scanned {scanned} cases).")
+    #     return {"queued": queued, "scanned": scanned, "case_ids": requeued_case_ids}
 
     def get_case_by_id(self, case_id: str) -> Optional[Dict]:
-        doc = db.collection("cases").document(case_id).get()
-        if doc.exists:
-            print(f"[DbManager] Retrieved case {case_id} from Firestore.")
-            return doc.to_dict()
-        print(f"[DbManager] Case {case_id} not found in Firestore.")
-        return None
+        try:
+            doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
+            if doc.exists:
+                print(f"[DbManager] Retrieved case {case_id} from Firestore.")
+                return doc.to_dict()
+            print(f"[DbManager] Case {case_id} not found in Firestore.")
+            return None
+        except Exception as e:
+            print(f"[DbManager] Error retrieving case {case_id}: {str(e)}")
+            return None
 
     def get_cases_list(
         self,
@@ -169,7 +253,7 @@ class DbManager:
         print(f"[DbManager] Filters: date_range={date_range}, created_by_me={created_by_me}, limit={limit}, start_after_id={start_after_id}")
 
         # Build base query
-        query = db.collection("cases")
+        query = db.collection(self.COLLECTION_NAME)
 
         # Filter by created_by if requested
         if created_by_me:
@@ -228,7 +312,7 @@ class DbManager:
         # Handle pagination cursor
         if start_after_id:
             # Get the document to start after
-            start_after_doc = db.collection("cases").document(start_after_id).get()
+            start_after_doc = db.collection(self.COLLECTION_NAME).document(start_after_id).get()
             if start_after_doc.exists:
                 query = query.start_after(start_after_doc)
                 print(f"[DbManager] Starting after case {start_after_id}")
@@ -271,70 +355,100 @@ class DbManager:
             "has_more": has_more
         }
 
-    def edit_case_by_id(self, case_id: str, updates: Dict[str, Any]):
-        db.collection("cases").document(case_id).update(updates)
-        print(f"[DbManager] Updated case {case_id}.")
+    def edit_case_by_id(self, case_id: str, updates: Dict[str, Any]) -> Tuple[str, str]:
+        try:
+            db.collection(self.COLLECTION_NAME).document(case_id).update(updates)
+            print(f"[DbManager] Updated case {case_id}.")
+            return case_id, "Success"
+        except Exception as e:
+            print(f"[DbManager] Error editing case {case_id}: {str(e)}")
+            return case_id, f"Failed: {str(e)}"
 
-    def get_undiagnosed_cases(self, clinician_id: str):
-        print(f"[DbManager] Retrieving undiagnosed cases for clinician {clinician_id}...")
+    def get_undiagnosed_cases(
+        self,
+        clinician_id: str,
+        limit: int = 100,
+        days_back: int = 90
+    ):
+        """
+        Retrieve undiagnosed cases for a clinician with pagination and date filtering.
 
-        cases = db.collection("cases").stream()
+        Args:
+            clinician_id: The clinician's UID
+            limit: Maximum number of cases to return (default: 100)
+            days_back: Only check cases from the last N days (default: 90)
+
+        Returns:
+            List of undiagnosed cases
+        """
+        print(f"[DbManager] Retrieving undiagnosed cases for clinician {clinician_id} (limit={limit}, days_back={days_back})...")
+
+        # Query recent cases first to reduce dataset
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+
+        query = db.collection(self.COLLECTION_NAME)\
+            .where("submitted_at", ">=", cutoff_date)\
+            .order_by("submitted_at", direction=firestore.Query.DESCENDING)\
+            .limit(limit * 2)  # Query more than limit to account for filtering
+
+        cases = query.stream()
         undiagnosed_cases = []
+        checked_count = 0
 
         for doc in cases:
+            checked_count += 1
             case_data = doc.to_dict()
             diagnoses_list = case_data.get("diagnoses", [])
 
+            # Check if this clinician hasn't diagnosed at least one lesion
             if any(clinician_id not in diag for diag in diagnoses_list):
                 undiagnosed_cases.append({
-                "case_id": doc.id,
-                **case_data
-            })
-                
-        print(f"[DbManager] Found {len(undiagnosed_cases)} undiagnosed cases for clinician {clinician_id}.")
+                    "case_id": doc.id,
+                    **case_data
+                })
+
+                # Stop if we've found enough undiagnosed cases
+                if len(undiagnosed_cases) >= limit:
+                    break
+
+        print(f"[DbManager] Found {len(undiagnosed_cases)} undiagnosed cases for clinician {clinician_id} (checked {checked_count} recent cases).")
         return undiagnosed_cases
 
-    def submit_case_diagnosis(self, case_id: str, diagnoses: List[Dict[str, Any]]):
-        print(f"[DbManager] Submitting case diagnosis for case {case_id}...")
-        doc_ref = db.collection("cases").document(case_id)
-        doc_snapshot = doc_ref.get()
+    def submit_case_diagnosis(self, case_id: str, diagnoses: List[Dict[str, Any]]) -> Tuple[str, str]:
+        try:
+            print(f"[DbManager] Submitting case diagnosis for case {case_id}...")
+            doc_ref = db.collection(self.COLLECTION_NAME).document(case_id)
+            doc_snapshot = doc_ref.get()
 
-        if not doc_snapshot.exists:
-            print(f"[DbManager] Case {case_id} not found")
-            return False
+            if not doc_snapshot.exists:
+                print(f"[DbManager] Case {case_id} not found")
+                return False
 
-        data = doc_snapshot.to_dict()
-        existing_diagnoses = data.get("diagnoses", [])
+            data = doc_snapshot.to_dict()
+            existing_diagnoses = data.get("diagnoses", [])
 
-        if len(existing_diagnoses) < len(diagnoses):
-            existing_diagnoses.extend([{} for _ in range(len(diagnoses) - len(existing_diagnoses))])
+            if len(existing_diagnoses) < len(diagnoses):
+                existing_diagnoses.extend([{} for _ in range(len(diagnoses) - len(existing_diagnoses))])
 
-        for idx, diag in enumerate(diagnoses):
-            if not isinstance(diag, dict):
-                continue
+            for idx, diag in enumerate(diagnoses):
+                if not isinstance(diag, dict):
+                    continue
 
-            for clinician_id, diag_data in diag.items():
-                existing_diagnoses[idx][clinician_id] = {
-                    "clinical_diagnosis": diag_data.get("clinical_diagnosis", "NULL"),
-                    "lesion_type": diag_data.get("lesion_type", "NULL"),
-                    "low_quality": diag_data.get("low_quality", False),
-                    "low_quality_reason": diag_data.get("low_quality_reason", "NULL"),
-                    # "timestamp": firestore.SERVER_TIMESTAMP, # Commented because of exception
-                }
+                for clinician_id, diag_data in diag.items():
+                    existing_diagnoses[idx][clinician_id] = {
+                        "clinical_diagnosis": diag_data.get("clinical_diagnosis", "NULL"),
+                        "lesion_type": diag_data.get("lesion_type", "NULL"),
+                        "low_quality": diag_data.get("low_quality", False),
+                        "low_quality_reason": diag_data.get("low_quality_reason", "NULL"),
+                        # "timestamp": firestore.SERVER_TIMESTAMP, # Commented because of exception
+                    }
 
-        doc_ref.update({"diagnoses": existing_diagnoses})
-        print(f"[DbManager] Updated {case_id} with {len(diagnoses)} diagnoses")
-
-    def get_all_cases(self):
-        print(f"[DbManager] Retrieving all cases...")
-        docs = db.collection("cases").stream()
-        all_cases = []
-        for doc in docs:
-            case = doc.to_dict()
-            case["case_id"] = doc.id
-            all_cases.append(case)
-        print(f"[DbManager] Retrieved {len(all_cases)} cases from Firestore.")
-        return all_cases
+            doc_ref.update({"diagnoses": existing_diagnoses})
+            print(f"[DbManager] Updated {case_id} with {len(diagnoses)} diagnoses")
+            return case_id, "Success"
+        except Exception as e:
+            print(f"[DbManager] Error submitting diagnosis of case {case_id}: {str(e)}")
+            return case_id, f"Failed: {str(e)}"
     
     async def export_bundle(
         self,
@@ -364,7 +478,12 @@ class DbManager:
     async def _process_bundle(self, base_dir: Path, include_all: bool = False):
         print(f"[DbManager] Processing bundle (include_all={include_all})...")
 
-        cases = self.get_all_cases()
+        # Get all case IDs first (lightweight query)
+        print(f"[DbManager] Fetching case IDs...")
+        docs = db.collection(self.COLLECTION_NAME).stream()
+        case_ids = [doc.id for doc in docs]
+        total_cases = len(case_ids)
+        print(f"[DbManager] Found {total_cases} cases to process.")
 
         images_dir = base_dir / "images"
         reports_dir = base_dir / "biopsy_reports"
@@ -399,190 +518,222 @@ class DbManager:
         clinician_mapping = {}
         clinician_counter = 0
 
-        for case in cases:
-            for diagnose in case.get("diagnoses", []):
-                for key, val in diagnose.items():
-                    if isinstance(val, dict) and all(k in val for k in ["lesion_type", "clinical_diagnosis", "low_quality", "low_quality_reason"]):
-                        uid = key
-                        if uid not in clinician_mapping:
-                            clinician_counter += 1
-                            clinician_mapping[uid] = f"clinician{clinician_counter:02d}"
+        # Process cases in batches to prevent memory overflow
+        BATCH_SIZE = 10  # Process 10 cases at a time
+        processed_count = 0
+
+        # First pass: Build clinician mapping (lightweight - only metadata)
+        print(f"[DbManager] Building clinician mapping...")
+        for i in range(0, len(case_ids), BATCH_SIZE):
+            batch_ids = case_ids[i:i + BATCH_SIZE]
+            for case_id in batch_ids:
+                doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
+                if not doc.exists:
+                    continue
+                case_data = doc.to_dict()
+                for diagnose in case_data.get("diagnoses", []):
+                    for key, val in diagnose.items():
+                        if isinstance(val, dict) and all(k in val for k in ["lesion_type", "clinical_diagnosis", "low_quality", "low_quality_reason"]):
+                            uid = key
+                            if uid not in clinician_mapping:
+                                clinician_counter += 1
+                                clinician_mapping[uid] = f"clinician{clinician_counter:02d}"
         print(f"[DbManager] Mapped {len(clinician_mapping)} clinicians.")
 
-        for case in cases:
-            name = idtype = idnum = dob = age = gender = ethnicity = phonenum = address = attending_hospital = lesion_clinical_presentation = chief_complaint = presenting_complaint_history = medication_history = medical_history = additional_comments = "NULL"
-            
-            aes_key = None
-            aes = case.get("encrypted_aes", {"salt": "NULL", "ciphertext": "NULL", "iv": "NULL"})
-            if (aes.get("salt") != "NULL" and aes.get("ciphertext") != "NULL" and aes.get("iv") != "NULL"):
-                aes_key = CryptoUtils.decrypt_aes_key_with_passphrase(
-                    encrypted_aes_key_b64=aes["ciphertext"],
-                    passphrase=PASSWORD,
-                    salt_b64=aes["salt"],
-                    iv_b64=aes["iv"]
-                )
+        # Second pass: Process cases in batches with full data
+        for batch_num, i in enumerate(range(0, len(case_ids), BATCH_SIZE), start=1):
+            batch_ids = case_ids[i:i + BATCH_SIZE]
+            print(f"[DbManager] Processing batch {batch_num}/{(len(case_ids) + BATCH_SIZE - 1) // BATCH_SIZE} ({len(batch_ids)} cases)...")
 
-            encrypted_blob = case.get("encrypted_blob", {"url": "NULL", "iv": "NULL"})
-            if (encrypted_blob.get("url") != "NULL" and encrypted_blob.get("iv") != "NULL" and aes_key):
-                encrypted_blob_data = await Storage.download(encrypted_blob.get("url"))
-                blob_data = CryptoUtils.decrypt_string(
-                    encrypted_data_b64=encrypted_blob_data,
-                    iv_b64=encrypted_blob["iv"],
-                    aes_key=aes_key
-                )
-                blob_data = json.loads(blob_data)
-                age = blob_data.get("age", "NULL")
-                gender = blob_data.get("gender", "NULL")
-                ethnicity = blob_data.get("ethnicity", "NULL")
-                lesion_clinical_presentation = blob_data.get("lesion_clinical_presentation", "NULL")
-                chief_complaint = blob_data.get("chief_complaint", "NULL")
-                presenting_complaint_history = blob_data.get("presenting_complaint_history", "NULL")
-                medication_history = blob_data.get("medication_history", "NULL")
-                medical_history = blob_data.get("medical_history", "NULL")
+            for case_id in batch_ids:
+                doc = db.collection(self.COLLECTION_NAME).document(case_id).get()
+                if not doc.exists:
+                    continue
 
-                for idx, img_b64 in enumerate(blob_data.get("images", [])):
-                    img_bytes = base64.b64decode(img_b64)
-                    img_path = images_dir / f"{case['case_id']}_{idx}.jpg"
-                    with open(img_path, "wb") as f:
-                        f.write(img_bytes)
+                case = doc.to_dict()
+                case["case_id"] = case_id
+                processed_count += 1
 
-                if include_all:
-                    name = blob_data.get("name", "NULL")
-                    idtype = blob_data.get("idtype", "NULL")
-                    idnum = blob_data.get("idnum", "NULL")
-                    dob = blob_data.get("dob", "NULL")
-                    phonenum = blob_data.get("phonenum", "NULL")
-                    address = blob_data.get("address", "NULL")
-                    attending_hospital = blob_data.get("attending_hospital", "NULL")
-                    consent_form = blob_data.get("consent_form", {
-                        "fileType": "NULL",
-                        "fileBytes": "NULL"
-                    })
-                    if consent_form["fileBytes"] != "NULL":
-                        file_bytes = consent_form["fileBytes"]
-                        if isinstance(file_bytes, str):
-                            decoded_bytes = base64.b64decode(file_bytes)
-                        elif isinstance(file_bytes, list):
-                            decoded_bytes = bytes(file_bytes)
-                        else:
-                            print(f"[DbManager] Skipped consent form of case {case['case_id']} with unknown fileBytes type: {type(file_bytes)}")
-                            decoded_bytes = None
-                        if decoded_bytes:
-                            with open(consent_dir / f"{case['case_id']}.{str(consent_form['fileType']).lower()}", "wb") as f:
-                                f.write(decoded_bytes)
+                name = idtype = idnum = dob = age = gender = ethnicity = phonenum = address = attending_hospital = lesion_clinical_presentation = chief_complaint = presenting_complaint_history = medication_history = medical_history = additional_comments = "NULL"
 
-            additional_comments_obj = case.get("additional_comments", {"ciphertext": "NULL", "iv": "NULL"})
-            if (additional_comments_obj.get("ciphertext") != "NULL" and additional_comments_obj.get("iv") != "NULL" and aes_key):
-                additional_comments = CryptoUtils.decrypt_string(
-                    encrypted_data_b64=additional_comments_obj["ciphertext"],
-                    iv_b64=additional_comments_obj["iv"],
-                    aes_key=aes_key
-                )
+                aes_key = None
+                aes = case.get("encrypted_aes", {"salt": "NULL", "ciphertext": "NULL", "iv": "NULL"})
+                if (aes.get("salt") != "NULL" and aes.get("ciphertext") != "NULL" and aes.get("iv") != "NULL"):
+                    aes_key = CryptoUtils.decrypt_aes_key_with_passphrase(
+                        encrypted_aes_key_b64=aes["ciphertext"],
+                        passphrase=PASSWORD,
+                        salt_b64=aes["salt"],
+                        iv_b64=aes["iv"]
+                    )
 
-            base = {
-                "case_id": case.get("case_id"),
-                "created_at": case.get("created_at"),
-                "created_by": case.get("created_by"),
-                "submitted_at": case.get("submitted_at"),
-                "name": name,
-                "idtype": idtype,
-                "idnum": idnum,
-                "dob": dob,
-                "age": age,
-                "gender": gender,
-                "ethnicity": ethnicity,
-                "phonenum": phonenum,
-                "address": address,
-                "attending_hospital": attending_hospital,
-                "alcohol": case.get("alcohol"),
-                "alcohol_duration": case.get("alcohol_duration"),
-                "betel_quid": case.get("betel_quid"),
-                "betel_quid_duration": case.get("betel_quid_duration"),
-                "smoking": case.get("smoking"),
-                "smoking_duration": case.get("smoking_duration"),
-                "lesion_clinical_presentation": lesion_clinical_presentation,
-                "chief_complaint": chief_complaint,
-                "presenting_complaint_history": presenting_complaint_history,
-                "medication_history": medication_history,
-                "medical_history": medical_history,
-                "oral_hygiene_products_used": case.get("oral_hygiene_products_used"),
-                "oral_hygiene_product_type_used": case.get("oral_hygiene_product_type_used"),
-                "sls_containing_toothpaste": case.get("sls_containing_toothpaste"),
-                "sls_containing_toothpaste_used": case.get("sls_containing_toothpaste_used"),
-                "additional_comments": additional_comments
-            }
-            if not include_all:
-                for col in ["name", "idtype", "idnum", "dob", "phonenum", "address", "attending_hospital"]:
-                    base.pop(col, None)
+                encrypted_blob = case.get("encrypted_blob", {"url": "NULL", "iv": "NULL"})
+                if (encrypted_blob.get("url") != "NULL" and encrypted_blob.get("iv") != "NULL" and aes_key):
+                    encrypted_blob_data = await Storage.download(encrypted_blob.get("url"))
+                    blob_data = CryptoUtils.decrypt_string(
+                        encrypted_data_b64=encrypted_blob_data,
+                        iv_b64=encrypted_blob["iv"],
+                        aes_key=aes_key
+                    )
+                    blob_data = json.loads(blob_data)
+                    age = blob_data.get("age", "NULL")
+                    gender = blob_data.get("gender", "NULL")
+                    ethnicity = blob_data.get("ethnicity", "NULL")
+                    lesion_clinical_presentation = blob_data.get("lesion_clinical_presentation", "NULL")
+                    chief_complaint = blob_data.get("chief_complaint", "NULL")
+                    presenting_complaint_history = blob_data.get("presenting_complaint_history", "NULL")
+                    medication_history = blob_data.get("medication_history", "NULL")
+                    medical_history = blob_data.get("medical_history", "NULL")
 
-            diagnoses = case.get("diagnoses", [])
-            if not diagnoses:
-                row = base.copy()
-                for i in range(9):
-                    row.update({
-                        "image_index": i,
-                        "ai_lesion_type": "NULL",
-                        "biopsy_clinical_diagnosis": "NULL",
-                        "biopsy_lesion_type": "NULL",
-                        "coe_clinical_diagnosis": "NULL",
-                        "coe_lesion_type": "NULL",
-                        "biopsy_agree_with_coe": "NULL",
-                    })
-                    for clinician in clinician_mapping.values():
-                        row[f"{clinician}_lesion_type"] = "NULL"
-                        row[f"{clinician}_clinical_diagnosis"] = "NULL"
-                        row[f"{clinician}_low_quality"] = "NULL"
-                        row[f"{clinician}_low_quality_reason"] = "NULL"
-                    rows.append(row)
-            else:
-                for i, diagnose in enumerate(diagnoses):
+                    for idx, img_b64 in enumerate(blob_data.get("images", [])):
+                        img_bytes = base64.b64decode(img_b64)
+                        img_path = images_dir / f"{case['case_id']}_{idx}.jpg"
+                        with open(img_path, "wb") as f:
+                            f.write(img_bytes)
+
+                    if include_all:
+                        name = blob_data.get("name", "NULL")
+                        idtype = blob_data.get("idtype", "NULL")
+                        idnum = blob_data.get("idnum", "NULL")
+                        dob = blob_data.get("dob", "NULL")
+                        phonenum = blob_data.get("phonenum", "NULL")
+                        address = blob_data.get("address", "NULL")
+                        attending_hospital = blob_data.get("attending_hospital", "NULL")
+                        consent_form = blob_data.get("consent_form", {
+                            "fileType": "NULL",
+                            "fileBytes": "NULL"
+                        })
+                        if consent_form["fileBytes"] != "NULL":
+                            file_bytes = consent_form["fileBytes"]
+                            if isinstance(file_bytes, str):
+                                decoded_bytes = base64.b64decode(file_bytes)
+                            elif isinstance(file_bytes, list):
+                                decoded_bytes = bytes(file_bytes)
+                            else:
+                                print(f"[DbManager] Skipped consent form of case {case['case_id']} with unknown fileBytes type: {type(file_bytes)}")
+                                decoded_bytes = None
+                            if decoded_bytes:
+                                with open(consent_dir / f"{case['case_id']}.{str(consent_form['fileType']).lower()}", "wb") as f:
+                                    f.write(decoded_bytes)
+
+                additional_comments_obj = case.get("additional_comments", {"ciphertext": "NULL", "iv": "NULL"})
+                if (additional_comments_obj.get("ciphertext") != "NULL" and additional_comments_obj.get("iv") != "NULL" and aes_key):
+                    additional_comments = CryptoUtils.decrypt_string(
+                        encrypted_data_b64=additional_comments_obj["ciphertext"],
+                        iv_b64=additional_comments_obj["iv"],
+                        aes_key=aes_key
+                    )
+
+                base = {
+                    "case_id": case.get("case_id"),
+                    "created_at": case.get("created_at"),
+                    "created_by": case.get("created_by"),
+                    "submitted_at": case.get("submitted_at"),
+                    "name": name,
+                    "idtype": idtype,
+                    "idnum": idnum,
+                    "dob": dob,
+                    "age": age,
+                    "gender": gender,
+                    "ethnicity": ethnicity,
+                    "phonenum": phonenum,
+                    "address": address,
+                    "attending_hospital": attending_hospital,
+                    "alcohol": case.get("alcohol"),
+                    "alcohol_duration": case.get("alcohol_duration"),
+                    "betel_quid": case.get("betel_quid"),
+                    "betel_quid_duration": case.get("betel_quid_duration"),
+                    "smoking": case.get("smoking"),
+                    "smoking_duration": case.get("smoking_duration"),
+                    "lesion_clinical_presentation": lesion_clinical_presentation,
+                    "chief_complaint": chief_complaint,
+                    "presenting_complaint_history": presenting_complaint_history,
+                    "medication_history": medication_history,
+                    "medical_history": medical_history,
+                    "oral_hygiene_products_used": case.get("oral_hygiene_products_used"),
+                    "oral_hygiene_product_type_used": case.get("oral_hygiene_product_type_used"),
+                    "sls_containing_toothpaste": case.get("sls_containing_toothpaste"),
+                    "sls_containing_toothpaste_used": case.get("sls_containing_toothpaste_used"),
+                    "additional_comments": additional_comments
+                }
+                if not include_all:
+                    for col in ["name", "idtype", "idnum", "dob", "phonenum", "address", "attending_hospital"]:
+                        base.pop(col, None)
+
+                diagnoses = case.get("diagnoses", [])
+                if not diagnoses:
                     row = base.copy()
-                    processed = _process_case(diagnose)
-                    row.update({
-                        "image_index": i,
-                        "ai_lesion_type": processed.get("ai_lesion_type", "NULL"),
-                        "biopsy_clinical_diagnosis": processed.get("biopsy_clinical_diagnosis", "NULL"),
-                        "biopsy_lesion_type": processed.get("biopsy_lesion_type", "NULL"),
-                        "coe_clinical_diagnosis": processed.get("coe_clinical_diagnosis", "NULL"),
-                        "coe_lesion_type": processed.get("coe_lesion_type", "NULL"),
-                        "biopsy_agree_with_coe": processed.get("biopsy_agree_with_coe", "NULL")
-                    })
-                    for uid, clinician in clinician_mapping.items():
-                        if uid in diagnose:
-                            cdata = diagnose[uid]
-                            row[f"{clinician}_lesion_type"] = cdata.get("lesion_type", "NULL")
-                            row[f"{clinician}_clinical_diagnosis"] = cdata.get("clinical_diagnosis", "NULL")
-                            row[f"{clinician}_low_quality"] = cdata.get("low_quality", "NULL")
-                            row[f"{clinician}_low_quality_reason"] = cdata.get("low_quality_reason", "NULL")
-                        else:
+                    for i in range(self.IMAGES_PER_CASE):
+                        row.update({
+                            "image_index": i,
+                            "ai_lesion_type": "NULL",
+                            "biopsy_clinical_diagnosis": "NULL",
+                            "biopsy_lesion_type": "NULL",
+                            "coe_clinical_diagnosis": "NULL",
+                            "coe_lesion_type": "NULL",
+                            "biopsy_agree_with_coe": "NULL",
+                        })
+                        for clinician in clinician_mapping.values():
                             row[f"{clinician}_lesion_type"] = "NULL"
                             row[f"{clinician}_clinical_diagnosis"] = "NULL"
                             row[f"{clinician}_low_quality"] = "NULL"
                             row[f"{clinician}_low_quality_reason"] = "NULL"
-                    rows.append(row)
+                        rows.append(row)
+                else:
+                    for i, diagnose in enumerate(diagnoses):
+                        row = base.copy()
+                        processed = _process_case(diagnose)
+                        row.update({
+                            "image_index": i,
+                            "ai_lesion_type": processed.get("ai_lesion_type", "NULL"),
+                            "biopsy_clinical_diagnosis": processed.get("biopsy_clinical_diagnosis", "NULL"),
+                            "biopsy_lesion_type": processed.get("biopsy_lesion_type", "NULL"),
+                            "coe_clinical_diagnosis": processed.get("coe_clinical_diagnosis", "NULL"),
+                            "coe_lesion_type": processed.get("coe_lesion_type", "NULL"),
+                            "biopsy_agree_with_coe": processed.get("biopsy_agree_with_coe", "NULL")
+                        })
+                        for uid, clinician in clinician_mapping.items():
+                            if uid in diagnose:
+                                cdata = diagnose[uid]
+                                row[f"{clinician}_lesion_type"] = cdata.get("lesion_type", "NULL")
+                                row[f"{clinician}_clinical_diagnosis"] = cdata.get("clinical_diagnosis", "NULL")
+                                row[f"{clinician}_low_quality"] = cdata.get("low_quality", "NULL")
+                                row[f"{clinician}_low_quality_reason"] = cdata.get("low_quality_reason", "NULL")
+                            else:
+                                row[f"{clinician}_lesion_type"] = "NULL"
+                                row[f"{clinician}_clinical_diagnosis"] = "NULL"
+                                row[f"{clinician}_low_quality"] = "NULL"
+                                row[f"{clinician}_low_quality_reason"] = "NULL"
+                        rows.append(row)
 
-                    biopsy_report_obj = diagnose.get("biopsy_report", {
-                        "url": "NULL",
-                        "iv": "NULL",
-                        "fileType": "NULL"
-                    })
-                    if (biopsy_report_obj.get("url") != "NULL" and biopsy_report_obj.get("iv") != "NULL" and aes_key):
-                        biopsy_report_data = await Storage.download(biopsy_report_obj.get("url"))
-                        biopsy_report = CryptoUtils.decrypt_string(
-                            encrypted_data_b64=biopsy_report_data,
-                            iv_b64=biopsy_report_obj["iv"],
-                            aes_key=aes_key
-                        )
-                        if isinstance(biopsy_report, str):
-                            decoded_bytes = base64.b64decode(biopsy_report)
-                        elif isinstance(biopsy_report, list):
-                            decoded_bytes = bytes(biopsy_report)
-                        else:
-                            print(f"[DbManager] Skipped biopsy report of case {case['case_id']} image {i} with unknown fileBytes type: {type(biopsy_report)}")
-                            decoded_bytes = None
-                        if decoded_bytes:
-                            with open(reports_dir / f"{case['case_id']}_{i}.{str(biopsy_report_obj['fileType']).lower()}", "wb") as f:
-                                f.write(decoded_bytes)
+                        biopsy_report_obj = diagnose.get("biopsy_report", {
+                            "url": "NULL",
+                            "iv": "NULL",
+                            "fileType": "NULL"
+                        })
+                        if (biopsy_report_obj.get("url") != "NULL" and biopsy_report_obj.get("iv") != "NULL" and aes_key):
+                            biopsy_report_data = await Storage.download(biopsy_report_obj.get("url"))
+                            biopsy_report = CryptoUtils.decrypt_string(
+                                encrypted_data_b64=biopsy_report_data,
+                                iv_b64=biopsy_report_obj["iv"],
+                                aes_key=aes_key
+                            )
+                            if isinstance(biopsy_report, str):
+                                decoded_bytes = base64.b64decode(biopsy_report)
+                            elif isinstance(biopsy_report, list):
+                                decoded_bytes = bytes(biopsy_report)
+                            else:
+                                print(f"[DbManager] Skipped biopsy report of case {case['case_id']} image {i} with unknown fileBytes type: {type(biopsy_report)}")
+                                decoded_bytes = None
+                            if decoded_bytes:
+                                with open(reports_dir / f"{case['case_id']}_{i}.{str(biopsy_report_obj['fileType']).lower()}", "wb") as f:
+                                    f.write(decoded_bytes)
+
+            # Clear processed batch from memory
+            import gc
+            gc.collect()
+            print(f"[DbManager] Batch {batch_num} complete. Total processed: {processed_count}/{total_cases}")
+
+        print(f"[DbManager] All {total_cases} cases processed.")
 
         mastersheet_df = pd.DataFrame(rows)
         print(f"[DbManager] Generated Sheet 1: Mastersheet with {len(mastersheet_df)} rows and {len(mastersheet_df.columns)} columns.")
